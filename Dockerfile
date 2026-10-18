@@ -10,6 +10,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+COPY --chown=node:node package.json ./package.json
 COPY --chown=node:node src ./src
 COPY --chown=node:node public ./public
 COPY --chown=node:node migrations ./migrations

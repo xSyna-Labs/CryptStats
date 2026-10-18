@@ -7,7 +7,6 @@ tests
 dist
 *.md
 package-lock.json
-package.json
 wrangler.toml
 .env
 .env.*
