@@ -20,7 +20,7 @@ Die Startseite ist öffentlich. Für das Bearbeiten ist ein Konto nötig.
 ## Installation
 
 ```bash
-git clone <repository-url> cryptstats
+git clone https://github.com/xsyna-labs/cryptstats cryptstats
 cd cryptstats
 npm install     # nur Entwicklungswerkzeuge (TypeScript); zur Laufzeit gibt es keine Abhängigkeiten
 npm start
