@@ -1,12 +1,13 @@
 services:
   cryptstats:
     build: .
-    image: cryptstats:latest
+    image: cryptstats:1.1.0
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Hinter einem HTTPS-Proxy (Caddy, nginx, Traefik) auf "true" setzen.
+      COOKIE_SECURE: "false"
     volumes:
       - cryptstats-data:/data
 

@@ -1,7 +1,7 @@
 // @ts-check
-import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { execute, one } from './db.js';
 
-/** @typedef {import('node:sqlite').DatabaseSync} Db */
+/** @typedef {import('./types.js').D1Database} D1Database */
 /** @typedef {'root' | 'admin' | 'viewer'} Role */
 /** @typedef {{ id: number, username: string, role: Role }} CurrentUser */
 
@@ -9,25 +9,75 @@ export const SESSION_COOKIE = 'cryptstats_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
-const KEY_LENGTH = 64;
+
+/**
+ * PBKDF2-SHA256 mit 100.000 Runden. Der Wert steht im Hash, damit spätere Erhöhungen
+ * alte Passwörter nicht ungültig machen.
+ */
+const PBKDF2_ITERATIONS = 100_000;
+const SALT_BYTES = 16;
+const KEY_BYTES = 32;
+
+const encoder = new TextEncoder();
+
+/** @param {Uint8Array} bytes */
+function toBase64(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** @param {string} value */
+function fromBase64(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** @param {Uint8Array} bytes */
+function bytesToBase64Url(bytes) {
+  return toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** @param {number} length */
+function randomBytes(length) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return bytes;
+}
 
 /**
  * @param {string} password
- * @param {Buffer} salt
- * @param {number} length
- * @returns {Promise<Buffer>}
+ * @param {Uint8Array} salt
+ * @param {number} iterations
+ * @returns {Promise<Uint8Array>}
  */
-function deriveKey(password, salt, length) {
-  return new Promise((resolve, reject) => {
-    scryptCallback(password, salt, length, (err, key) => (err ? reject(err) : resolve(key)));
-  });
+async function deriveKey(password, salt, iterations) {
+  const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, [
+    'deriveBits',
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    material,
+    KEY_BYTES * 8,
+  );
+  return new Uint8Array(bits);
+}
+
+/** @param {Uint8Array} a @param {Uint8Array} b */
+function equalBytes(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return diff === 0;
 }
 
 /** @param {string} password */
 export async function hashPassword(password) {
-  const salt = randomBytes(16);
-  const key = await deriveKey(password, salt, KEY_LENGTH);
-  return `scrypt$${salt.toString('base64')}$${key.toString('base64')}`;
+  const salt = randomBytes(SALT_BYTES);
+  const key = await deriveKey(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${toBase64(salt)}$${toBase64(key)}`;
 }
 
 /**
@@ -36,30 +86,37 @@ export async function hashPassword(password) {
  */
 export async function verifyPassword(password, stored) {
   const parts = stored.split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const salt = Buffer.from(parts[1] ?? '', 'base64');
-  const expected = Buffer.from(parts[2] ?? '', 'base64');
-  if (expected.length === 0) return false;
-  const actual = await deriveKey(password, salt, expected.length);
-  return timingSafeEqual(expected, actual);
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+  const iterations = Number(parts[1]);
+  if (!Number.isInteger(iterations) || iterations <= 0) return false;
+  const salt = fromBase64(parts[2] ?? '');
+  const expected = fromBase64(parts[3] ?? '');
+  if (salt.length === 0 || expected.length === 0) return false;
+  const actual = await deriveKey(password, salt, iterations);
+  return equalBytes(expected, actual);
 }
 
 /** @param {string} value */
-function sha256Hex(value) {
-  return createHash('sha256').update(value).digest('hex');
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} userId
  * @param {Date} now
  */
-export function createSession(db, userId, now) {
-  const token = randomBytes(32).toString('base64url');
+export async function createSession(db, userId, now) {
+  const token = bytesToBase64Url(randomBytes(32));
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now.toISOString());
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(
-    sha256Hex(token),
+  await execute(db, 'DELETE FROM sessions WHERE expires_at <= ?', now.toISOString());
+  await execute(
+    db,
+    'INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)',
+    await sha256Hex(token),
     userId,
     expiresAt,
   );
@@ -69,31 +126,35 @@ export function createSession(db, userId, now) {
 /**
  * Liefert den angemeldeten Benutzer. Die Rolle wird bei jeder Anfrage aus der Datenbank gelesen,
  * damit Rollenänderungen sofort wirken.
- * @param {Db} db
+ * @param {D1Database} db
  * @param {string | undefined} token
  * @param {Date} now
- * @returns {CurrentUser | null}
+ * @returns {Promise<CurrentUser | null>}
  */
-export function getSessionUser(db, token, now) {
+export async function getSessionUser(db, token, now) {
   if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.id, u.username, u.role, s.expires_at
-       FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ?`,
-    )
-    .get(sha256Hex(token));
+  const row = await one(
+    db,
+    `SELECT u.id, u.username, u.role, s.expires_at
+     FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ?`,
+    await sha256Hex(token),
+  );
   if (!row || String(row.expires_at) <= now.toISOString()) return null;
-  return { id: Number(row.id), username: String(row.username), role: /** @type {Role} */ (String(row.role)) };
+  return {
+    id: Number(row.id),
+    username: String(row.username),
+    role: /** @type {Role} */ (String(row.role)),
+  };
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {string | undefined} token
  */
-export function destroySession(db, token) {
+export async function destroySession(db, token) {
   if (!token) return;
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256Hex(token));
+  await execute(db, 'DELETE FROM sessions WHERE token_hash = ?', await sha256Hex(token));
 }
 
 /**
@@ -129,7 +190,11 @@ export function canWrite(role) {
   return role === 'root' || role === 'admin';
 }
 
-/** Begrenzt Fehlversuche beim Login pro Schlüssel (z. B. IP-Adresse). */
+/**
+ * Begrenzt Fehlversuche beim Login pro Schlüssel (z. B. IP-Adresse).
+ * Der Zähler lebt pro Worker-Isolate; das ist ein bewusster Kompromiss, um D1 nicht
+ * mit einem Schreibvorgang pro Fehlversuch zu belasten.
+ */
 export class LoginLimiter {
   /** @type {Map<string, { failures: number, resetAt: number }>} */
   #entries = new Map();

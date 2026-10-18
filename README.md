@@ -1,168 +1,183 @@
 # CryptStats
 
-CryptStats macht den Fortschritt von Projekten als Krypto-Aktie sichtbar. Jedes Projekt bekommt einen Namen und ein Kürzel (z. B. `MPJ`). Ein Administrator trägt Meilensteine mit einem positiven oder negativen Wert ein: Ein Erfolg lässt den Kurs steigen, ein Rückschlag mit `−` fällt. Ereignisse lassen sich auch für die Zukunft planen und werden dann automatisch angewendet.
+Projekte als Krypto-Aktien: Meilensteine treiben den Kurs. Marktübersicht, Detailseiten mit
+Kursverlauf und ein Admin-Bereich mit Rollen (Root, Admin, Lesend).
 
-Je Aktie zeigt die Seite:
+Ein Codebase, zwei Betriebsarten:
 
-- aktuellen Kurs mit Veränderung in den letzten 24 Stunden (absolut und in Prozent)
-- einen interaktiven Kursverlauf mit den Zeiträumen 1T, 1W, 1M, 1J und MAX; Meilensteine sind im Chart markiert
-- Kennzahlen: Performance seit IPO, Allzeithoch und -tief, Startkurs, Anzahl der Meilensteine
-- Meilensteine (angewendet) und geplante Ereignisse
-- Unterprojekte, die als eigene Aktien mit Verweis zum Elternprojekt angelegt werden
-- einen Kursticker oben sowie eine Marktübersicht mit Sortierung, Suche und Minicharts der letzten 7 Tage
+| | Docker / privater Server | Cloudflare Workers |
+| --- | --- | --- |
+| Datenbank | SQLite-Datei im Volume | D1 |
+| Statische Dateien | aus `public/` | ASSETS-Binding |
+| Fällige Meilensteine | Intervall alle 15 s | Cron jede Minute + bei API-Aufruf |
+| Laufzeit | Node 24 (HTTP + SQLite eingebaut) | workerd |
 
-Die Startseite ist öffentlich. Für das Bearbeiten ist ein Konto nötig.
+Beide Wege nutzen denselben `fetch`-Handler in [src/app.js](src/app.js). Der SQLite-Adapter
+[src/sqlite-d1.js](src/sqlite-d1.js) bildet die D1-API nach, damit `store.js`, `users.js`
+und `auth.js` unverändert laufen.
 
-## Voraussetzungen
+## Docker (privater Server)
 
-- **Node.js 22.13 oder neuer** (verwendet das eingebaute `node:sqlite`; es müssen keine nativen Pakete kompiliert werden)
+```bash
+docker compose up -d --build
+```
 
-## Installation
+Danach `http://<server>:3000/#/admin` öffnen und das Root-Konto anlegen.
+Die SQLite-Datei liegt im Volume `cryptstats-data` (`/data/cryptstats.db`) und übersteht
+Updates und Neustarts.
+
+Ohne Compose:
+
+```bash
+docker build -t cryptstats:1.1.0 .
+docker run -d --name cryptstats --restart unless-stopped \
+  -p 3000:3000 -v cryptstats-data:/data cryptstats:1.1.0
+```
+
+**HTTPS:** Läuft die Seite hinter Caddy, nginx oder Traefik, `COOKIE_SECURE=true` setzen
+(Compose-Datei oder `-e COOKIE_SECURE=true`). Ohne TLS muss der Wert `false` bleiben,
+sonst nimmt der Browser das Session-Cookie nicht an.
+
+**Speicherplatz:** Das Image basiert auf `node:24-alpine` (59,6 MiB komprimiert) und enthält
+**keine** Laufzeit-Abhängigkeiten – kein `npm install` im Container. Der Anwendungscode
+selbst ist unter 100 KiB. Dazu kommt nur die SQLite-Datei im Volume, inklusive WAL-Dateien
+typischerweise wenige hundert KiB bis einige MiB.
+
+**Backup:** Container kurz stoppen und `/data` kopieren, oder online:
+
+```bash
+docker exec cryptstats node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync('/data/cryptstats.db').exec(\"VACUUM INTO '/data/backup.db'\")"
+docker cp cryptstats:/data/backup.db ./cryptstats-backup.db
+```
+
+**Zurücksetzen:** Volume löschen (`docker compose down -v`); beim nächsten Start werden die
+Tabellen aus `migrations/` neu angelegt.
+
+## Cloudflare Workers
+
+```bash
+npx wrangler login
+npx wrangler d1 create cryptstats   # database_id in wrangler.toml eintragen
+npm run db:migrate
+npm run deploy
+```
+
+Im Dashboard unter **Workers & Pages → cryptstats → Settings → Domains & Routes** die
+Custom Domain `stats.xSyna.de` hinzufügen. Der bisherige Hello-World-Worker muss gelöscht
+werden oder die Domain abgeben, sonst bedient er weiter die Route.
+
+Sofort nach dem Deploy `https://stats.xSyna.de/#/admin` öffnen und das Root-Konto anlegen:
+Solange kein Konto existiert, ist die Ersteinrichtung offen und der erste Aufruf gewinnt.
+
+> **CPU-Limit:** Der Workers-Free-Plan erlaubt 10 ms CPU pro Anfrage. PBKDF2 mit 100.000
+> Runden braucht mehr, daher funktionieren Login und Ersteinrichtung zuverlässig nur mit
+> **Workers Paid** (30 s CPU). Die Docker-Variante hat dieses Limit nicht.
+
+### Warum „Hello World“?
+
+Der Standard-Worker von Cloudflare antwortet auf jede Route mit `Hello world`. Zeigt
+`stats.xSyna.de` das an, läuft dort noch die leere Vorlage. Die frühere Node-Fassung
+(v1.0.0) konnte auf Workers gar nicht starten: `node:http`, `node:sqlite` und das
+Dateisystem gibt es dort nicht.
+
+## Lokal starten
 
 ```bash
 git clone https://github.com/xsyna-labs/cryptstats cryptstats
 cd cryptstats
-npm install     # nur Entwicklungswerkzeuge (TypeScript); zur Laufzeit gibt es keine Abhängigkeiten
-npm start
+
+# Docker-Variante (Node)
+npm install
+npm start            # http://localhost:3000, DB in data/cryptstats.db
+npm run dev:node     # mit Auto-Reload
+
+# Workers-Variante
+npm run db:migrate:local
+npm run dev          # http://localhost:8787
 ```
-
-Dann im Browser <http://localhost:3000/#/admin> öffnen. Beim ersten Aufruf erscheint die **Ersteinrichtung**: Benutzername und Passwort (mindestens 12 Zeichen) für das Root-Konto festlegen. Danach ist die Einrichtung abgeschlossen, und die Anmeldung erfolgt mit diesem Konto.
-
-Optional: `.env.example` nach `.env` kopieren, um Port, Adresse oder Datenbankpfad anzupassen. Für die Entwicklung mit automatischem Neustart: `npm run dev`.
-
-## Konten und Rollen
-
-Konten verwaltet das Root-Konto unter **Admin → Benutzer**, wie bei Uptime Kuma.
-
-| Rolle | Darf |
-| --- | --- |
-| **Root** | alles, inklusive Konten anlegen, Rollen ändern, Passwörter zurücksetzen und Konten löschen |
-| **Admin** | Aktien anlegen, bearbeiten und löschen; Ereignisse eintragen, ändern, löschen und sofort anwenden |
-| **Lesend** | den Admin-Bereich einsehen, aber nichts ändern |
-
-Regeln:
-
-- Es gibt immer mindestens ein Root-Konto. Das letzte Root-Konto lässt sich weder löschen noch herabstufen.
-- Ein Konto kann sich nicht selbst löschen.
-- Rollenänderungen wirken sofort, auch für bereits angemeldete Nutzer.
-- Ein zurückgesetztes Passwort beendet alle Sitzungen des Kontos. Jeder Nutzer kann sein eigenes Passwort über **Mein Passwort ändern** wechseln.
-- Benutzernamen sind nicht case-sensitiv (`Anna` und `anna` sind dasselbe Konto).
-
-## Aktien, Meilensteine und Zeitplan
-
-1. **Aktien**: Name, Kürzel (2–8 Buchstaben oder Ziffern), Startkurs (Standard 100), Notierungsdatum, optionales übergeordnetes Projekt, Link und Beschreibung. Startkurs und Notierungsdatum sind nach dem Anlegen festgelegt.
-2. **Meilensteine und Ereignisse**: Titel, Wert (positiv = steigt, negativ = fällt), Zeitpunkt und Beschreibung.
-   - Zeitpunkt jetzt oder in der Vergangenheit: das Ereignis wird sofort angewendet. Rückdatierungen sind erlaubt, aber nicht vor dem Notierungsdatum.
-   - Zeitpunkt in der Zukunft: das Ereignis wird geplant und zum angegebenen Zeitpunkt automatisch angewendet. Der Server prüft dies alle 15 Sekunden und bei jedem Seitenaufruf.
-3. **Ereignisse verwalten**: bearbeiten, löschen oder geplante Ereignisse mit „Jetzt anwenden“ sofort anwenden (der Zeitpunkt wird auf „jetzt“ gesetzt).
-
-Nach jeder Änderung werden die Kurse aus Startkurs und allen angewendeten Ereignissen in zeitlicher Reihenfolge neu berechnet. Der Kurs fällt nie unter `0,01`.
-
-Weitere Regeln:
-
-- Ein Projekt mit Unterprojekten lässt sich erst löschen, wenn die Unterprojekte entfernt oder umgehängt wurden.
-- Ein Projekt kann nicht unter sich selbst oder einem seiner Unterprojekte hängen.
-- Das Kürzel ist eindeutig.
 
 ## Konfiguration
 
-Alle Einstellungen sind Umgebungsvariablen (oder stehen in `.env`):
+| Variable | Standard (Docker) | Standard (Workers) | Bedeutung |
+| --- | --- | --- | --- |
+| `PORT` | `3000` | – | HTTP-Port |
+| `HOST` | `0.0.0.0` | – | Bind-Adresse |
+| `DB_PATH` | `data/cryptstats.db` | – | Pfad zur SQLite-Datei |
+| `COOKIE_SECURE` | `false` | `true` | Session-Cookie nur über HTTPS |
 
-| Variable | Standard | Beschreibung |
-| --- | --- | --- |
-| `PORT` | `3000` | Port des HTTP-Servers |
-| `HOST` | `0.0.0.0` | Adresse, auf die der Server lauscht |
-| `DB_PATH` | `data/cryptstats.db` | Speicherort der SQLite-Datenbank |
-| `COOKIE_SECURE` | `false` | Auf `true` setzen, sobald die Seite über HTTPS läuft (Session-Cookie nur über HTTPS) |
+Passwörter werden mit **PBKDF2-SHA256** (100.000 Runden, 16-Byte-Salt) gehasht. Die
+Rundenzahl steht im Hash, spätere Erhöhungen machen alte Passwörter nicht ungültig.
 
-Die Einheit „Coins“ ist die Konstante `UNIT` in `public/app.js`.
+## Rollen
 
-Sicherheit: Sessions laufen nach 12 Stunden ab. Nach 5 Fehlversuchen innerhalb von 15 Minuten wird der Login pro IP-Adresse gesperrt.
+| Rolle | Rechte |
+| --- | --- |
+| `root` | alles, inklusive Konten anlegen, Rollen ändern, Passwörter zurücksetzen, Konten löschen |
+| `admin` | Aktien und Meilensteine verwalten |
+| `viewer` | alles lesen, nichts ändern |
+
+Es bleibt immer mindestens ein Root-Konto. Rollenänderungen wirken sofort, weil die Rolle
+bei jeder Anfrage aus der Datenbank gelesen wird. Markt und Detailseiten sind ohne
+Anmeldung lesbar; nur der Admin-Bereich verlangt ein Konto.
 
 ## API
 
-Öffentlich (JSON):
-
-| Methode | Pfad | Beschreibung |
+| Methode | Pfad | Zugriff |
 | --- | --- | --- |
-| `GET` | `/api/market` | Alle Aktien mit Kurs, 24-h-Veränderung und Verlauf |
-| `GET` | `/api/stocks/:slug` | Detail einer Aktie mit Verlauf, Ereignissen, geplanten Ereignissen, Eltern- und Unterprojekten |
-| `GET` | `/api/auth/status` | `setupRequired` und das angemeldete Konto (oder `null`) |
-| `POST` | `/api/auth/setup` | Ersteinrichtung, legt das Root-Konto an (nur solange noch kein Konto existiert) |
-| `POST` | `/api/auth/login` | Anmeldung mit `{ "username", "password" }` |
-| `POST` | `/api/auth/logout` | Sitzung beenden |
-| `POST` | `/api/auth/password` | Eigenes Passwort ändern: `{ "currentPassword", "newPassword" }` |
+| `GET` | `/api/market` | öffentlich |
+| `GET` | `/api/stocks/:slug` | öffentlich |
+| `GET` | `/api/auth/status` | öffentlich |
+| `POST` | `/api/auth/setup` | nur solange kein Konto existiert |
+| `POST` | `/api/auth/login` | öffentlich |
+| `POST` | `/api/auth/logout` | angemeldet |
+| `POST` | `/api/auth/password` | angemeldet |
+| `GET` | `/api/admin/users` | root |
+| `POST` | `/api/admin/users` | root |
+| `PUT`/`DELETE` | `/api/admin/users/:id` | root |
+| `POST` | `/api/admin/stocks` | root/admin |
+| `PUT`/`DELETE` | `/api/admin/stocks/:id` | root/admin |
+| `POST` | `/api/admin/events` | root/admin |
+| `PUT`/`DELETE` | `/api/admin/events/:id` | root/admin |
+| `POST` | `/api/admin/events/:id/apply` | root/admin |
 
-Mit Sitzung (Cookie aus dem Login). Lesende Konten dürfen nur die Leseroute `GET` nutzen, alle Schreibrouten sind Admin und Root vorbehalten:
+Alle schreibenden Anfragen brauchen `Content-Type: application/json`. Ein fremder
+`Origin`-Header wird mit `403` abgewiesen.
 
-| Methode | Pfad | Rolle |
-| --- | --- | --- |
-| `POST` | `/api/admin/stocks` | Admin, Root |
-| `PUT` / `DELETE` | `/api/admin/stocks/:id` | Admin, Root |
-| `POST` | `/api/admin/events` | Admin, Root |
-| `PUT` / `DELETE` | `/api/admin/events/:id` | Admin, Root |
-| `POST` | `/api/admin/events/:id/apply` | Admin, Root |
-| `GET` / `POST` | `/api/admin/users` | nur Root |
-| `PUT` / `DELETE` | `/api/admin/users/:id` | nur Root |
+## Sicherheit
 
-Schreibzugriffe erwarten `Content-Type: application/json`. Ein Beispiel für einen Meilenstein per API:
-
-```bash
-curl -c cookies.txt -H 'Content-Type: application/json' \
-  -d '{"username":"root","password":"<passwort>"}' http://localhost:3000/api/auth/login
-curl -b cookies.txt -H 'Content-Type: application/json' \
-  -d '{"stockId": 1, "title": "Version 1.0 veröffentlicht", "delta": 25}' \
-  http://localhost:3000/api/admin/events
-```
-
-## Deployment
-
-### Docker
-
-```bash
-docker build -t cryptstats .
-docker run -d --name cryptstats -p 3000:3000 -v cryptstats-data:/data cryptstats
-```
-
-Oder mit Docker Compose:
-
-```bash
-docker compose up -d
-```
-
-Danach wie oben im Browser die Ersteinrichtung abschließen. Die Datenbank liegt im Volume `/data` und bleibt bei Updates erhalten.
-
-### Hinter einem Reverse-Proxy
-
-- Den Proxy per HTTPS betreiben und `COOKIE_SECURE=true` setzen.
-- Der Login-Schutz verwendet die Verbindungs-IP des Servers. Hinter einem Proxy teilen sich alle Clients dieselbe Sperre. Dafür muss der Proxy die echte Client-IP weitergeben oder die Sperre in `src/auth.js` angepasst werden.
-
-### Backup
-
-Die Datenbank ist eine einzelne SQLite-Datei (`DB_PATH`, WAL-Modus). Sicherung zur Laufzeit etwa mit `sqlite3 data/cryptstats.db ".backup backup.db"`; bei gestopptem Server genügt das Kopieren der Datei.
+- Session-Cookie: `HttpOnly`, `SameSite=Strict`, `Secure` bei HTTPS, 12 Stunden Laufzeit.
+- Login-Sperre nach 5 Fehlversuchen in 15 Minuten. Der Zähler liegt im Prozess bzw.
+  Worker-Isolate und ist damit nicht global über mehrere Instanzen.
+- Sicherheits-Header (CSP, `X-Frame-Options`, `nosniff`) für API und statische Dateien.
+- Fremdschlüssel und `CHECK`-Constraints; Preise fallen nie unter `0,01`.
+- Kursneuberechnung läuft als Batch und gilt damit gemeinsam.
 
 ## Entwicklung
 
 ```bash
-npm test          # Tests (node:test)
-npm run typecheck # TypeScript-Prüfung der JavaScript-Quellen (checkJs)
+npm run typecheck   # tsc --noEmit
+npm test            # node:test, 38 Tests
 ```
 
-```
-src/
-  server.js    Einstiegspunkt, Scheduler für fällige Ereignisse
-  app.js       HTTP-Routen, Anmeldung, Rollen, Same-Origin-Prüfung, statische Auslieferung
-  store.js     Datenbankzugriff für Aktien und Ereignisse, Kursberechnung, Ansichten
-  users.js     Konten, Ersteinrichtung, Rollen, Passwörter
-  auth.js      scrypt-Passwort-Hashing, Sessions, Cookies, Login-Limit
-  pricing.js   Reine Funktionen: Kursverlauf, Veränderung, Statistik
-  validate.js  Eingabeprüfung
-  db.js        SQLite-Verbindung und Schema
-  config.js    Umgebungsvariablen
-public/        Frontend (HTML, CSS, JavaScript ohne Build-Schritt)
-tests/         Tests
-```
+Die Tests laufen gegen den produktiven SQLite-Adapter (`src/sqlite-d1.js`) und rufen den
+`fetch`-Handler direkt auf. Zusätzlich deckt `wrangler dev` die echte Workers-Runtime mit
+lokaler D1-Emulation ab.
 
-## Lizenz
+## Struktur
 
-MIT, siehe [LICENSE.md](LICENSE.md).
+```
+src/worker.js     Workers-Einstieg: fetch + scheduled (Cron)
+src/server.js     Node-Einstieg für Docker: HTTP, Assets, Scheduler
+src/app.js        Routing, Auth-Routen, Admin-Routen, Assets
+src/store.js      Aktien, Meilensteine, Kursberechnung
+src/users.js      Konten und Rollen
+src/auth.js       PBKDF2, Sessions, Login-Sperre
+src/db.js         D1-Helfer
+src/sqlite-d1.js  SQLite-Adapter mit D1-API (Docker)
+src/assets.js     Datei-Auslieferung für Docker
+src/pricing.js    Kurslogik
+src/validate.js   Eingabeprüfung
+migrations/       Schema für D1 und SQLite
+public/           Frontend ohne Build-Schritt
+tests/            Tests
+```

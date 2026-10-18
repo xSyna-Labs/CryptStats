@@ -8,9 +8,9 @@ import {
   historyStats,
   sampleValues,
 } from './pricing.js';
+import { execute, many, one } from './db.js';
 
-/** @typedef {import('node:sqlite').DatabaseSync} Db */
-/** @typedef {import('node:sqlite').SQLInputValue} SqlValue */
+/** @typedef {import('./types.js').D1Database} D1Database */
 /** @typedef {import('./pricing.js').Point} Point */
 
 /**
@@ -43,113 +43,105 @@ import {
 
 /**
  * @template T
- * @param {Db} db
- * @param {(() => T)} fn
- * @returns {T}
+ * @param {Record<string, unknown> | null} row
+ * @returns {T | null}
  */
-export function transaction(db, fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+function cast(row) {
+  return /** @type {T | null} */ (/** @type {unknown} */ (row));
 }
 
 /**
- * @param {Db} db
- * @param {string} sql
- * @param {SqlValue[]} [params]
+ * @template T
+ * @param {Record<string, unknown>[]} rows
+ * @returns {T[]}
  */
-function rows(db, sql, params = []) {
-  return db.prepare(sql).all(...params);
+function castAll(rows) {
+  return /** @type {T[]} */ (/** @type {unknown} */ (rows));
 }
 
-/** @param {Db} db @param {number} id */
-function findStock(db, id) {
-  return /** @type {StockRow | undefined} */ (
-    db.prepare('SELECT * FROM stocks WHERE id = ?').get(id)
-  );
+/** @param {D1Database} db @param {number} id */
+async function findStock(db, id) {
+  return cast(await one(db, 'SELECT * FROM stocks WHERE id = ?', id));
 }
 
-/** @param {Db} db @param {number} id */
-function requireStock(db, id) {
-  const stock = findStock(db, id);
+/** @param {D1Database} db @param {number} id */
+async function requireStock(db, id) {
+  const stock = await findStock(db, id);
   if (!stock) throw new ApiError(404, 'Aktie nicht gefunden');
   return stock;
 }
 
-/** @param {Db} db @param {number} id */
-function requireEvent(db, id) {
-  const event = /** @type {EventRow | undefined} */ (
-    db.prepare('SELECT * FROM events WHERE id = ?').get(id)
-  );
+/** @param {D1Database} db @param {number} id */
+async function requireEvent(db, id) {
+  const event = cast(await one(db, 'SELECT * FROM events WHERE id = ?', id));
   if (!event) throw new ApiError(404, 'Ereignis nicht gefunden');
   return event;
 }
 
 /**
- * Wendet alle fälligen geplanten Ereignisse an und berechnet die betroffenen Kurse neu.
- * @param {Db} db
- * @param {Date} [now]
- * @returns {number} Anzahl der betroffenen Aktien
- */
-export function applyDueEvents(db, now = new Date()) {
-  const iso = now.toISOString();
-  return transaction(db, () => {
-    const due = /** @type {{ stock_id: number }[]} */ (
-      rows(
-        db,
-        `SELECT DISTINCT stock_id FROM events WHERE status = 'scheduled' AND occurs_at <= ?`,
-        [iso],
-      )
-    );
-    if (due.length === 0) return 0;
-    db.prepare(`UPDATE events SET status = 'applied' WHERE status = 'scheduled' AND occurs_at <= ?`).run(
-      iso,
-    );
-    for (const { stock_id } of due) recalculateStock(db, stock_id);
-    return due.length;
-  });
-}
-
-/**
  * Berechnet Kurs und Kursverlauf einer Aktie aus Startkurs und allen angewendeten Ereignissen neu.
- * Muss innerhalb einer Transaktion aufgerufen werden.
- * @param {Db} db
+ * Die Schreibvorgänge laufen als D1-Batch, damit sie gemeinsam gelten.
+ * @param {D1Database} db
  * @param {number} stockId
  */
-export function recalculateStock(db, stockId) {
-  const stock = findStock(db, stockId);
+export async function recalculateStock(db, stockId) {
+  const stock = await findStock(db, stockId);
   if (!stock) return;
-  const applied = /** @type {{ id: number, delta: number }[]} */ (
-    rows(
+  const applied = castAll(
+    await many(
       db,
       `SELECT id, delta FROM events WHERE stock_id = ? AND status = 'applied' ORDER BY occurs_at, id`,
-      [stockId],
-    )
+      stockId,
+    ),
   );
-  db.prepare(`UPDATE events SET price_after = NULL WHERE stock_id = ? AND status = 'scheduled'`).run(stockId);
-  const update = db.prepare('UPDATE events SET price_after = ? WHERE id = ?');
+
+  const statements = [
+    db
+      .prepare(`UPDATE events SET price_after = NULL WHERE stock_id = ? AND status = 'scheduled'`)
+      .bind(stockId),
+  ];
   let price = stock.start_price;
   for (const event of applied) {
     price = clampPrice(price + event.delta);
-    update.run(price, event.id);
+    statements.push(db.prepare('UPDATE events SET price_after = ? WHERE id = ?').bind(price, event.id));
   }
-  db.prepare('UPDATE stocks SET current_price = ? WHERE id = ?').run(price, stockId);
+  statements.push(db.prepare('UPDATE stocks SET current_price = ? WHERE id = ?').bind(price, stockId));
+  await db.batch(statements);
 }
 
 /**
- * @param {Db} db
+ * Wendet alle fälligen geplanten Ereignisse an und berechnet die betroffenen Kurse neu.
+ * @param {D1Database} db
+ * @param {Date} [now]
+ * @returns {Promise<number>} Anzahl der betroffenen Aktien
+ */
+export async function applyDueEvents(db, now = new Date()) {
+  const iso = now.toISOString();
+  const due = castAll(
+    await many(
+      db,
+      `SELECT DISTINCT stock_id FROM events WHERE status = 'scheduled' AND occurs_at <= ?`,
+      iso,
+    ),
+  );
+  if (due.length === 0) return 0;
+  await execute(
+    db,
+    `UPDATE events SET status = 'applied' WHERE status = 'scheduled' AND occurs_at <= ?`,
+    iso,
+  );
+  for (const row of due) await recalculateStock(db, row.stock_id);
+  return due.length;
+}
+
+/**
+ * @param {D1Database} db
  * @param {string} base
  */
-function uniqueSlug(db, base) {
+async function uniqueSlug(db, base) {
   let slug = base;
   let n = 2;
-  while (rows(db, 'SELECT id FROM stocks WHERE slug = ?', [slug]).length > 0) {
+  while ((await one(db, 'SELECT id FROM stocks WHERE slug = ?', slug)) !== null) {
     slug = `${base}-${n++}`;
   }
   return slug;
@@ -171,94 +163,90 @@ export function slugify(name) {
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {string} symbol
  * @param {number} exceptId
  */
-function ensureSymbolFree(db, symbol, exceptId) {
-  const taken = rows(db, 'SELECT id FROM stocks WHERE symbol = ? AND id != ?', [symbol, exceptId]);
+async function ensureSymbolFree(db, symbol, exceptId) {
+  const taken = await many(db, 'SELECT id FROM stocks WHERE symbol = ? AND id != ?', symbol, exceptId);
   if (taken.length > 0) throw new ApiError(409, 'Dieses Kürzel ist bereits vergeben');
 }
 
-/**
- * @param {Db} db
- * @param {number | null} parentId
- */
-function ensureParentExists(db, parentId) {
-  if (parentId !== null) requireStock(db, parentId);
+/** @param {D1Database} db @param {number | null} parentId */
+async function ensureParentExists(db, parentId) {
+  if (parentId !== null) await requireStock(db, parentId);
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {ReturnType<import('./validate.js').validateStockInput>} input
  * @param {Date} now
- * @returns {number}
+ * @returns {Promise<number>}
  */
-export function createStock(db, input, now) {
-  return transaction(db, () => {
-    ensureSymbolFree(db, input.symbol, -1);
-    ensureParentExists(db, input.parentId);
-    const slug = uniqueSlug(db, slugify(input.name) || input.symbol.toLowerCase());
-    const info = db
-      .prepare(
-        `INSERT INTO stocks (slug, symbol, name, description, url, parent_id, start_price, current_price, listed_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        slug,
-        input.symbol,
-        input.name,
-        input.description,
-        input.url,
-        input.parentId,
-        input.startPrice,
-        input.startPrice,
-        input.listedAt,
-        now.toISOString(),
-      );
-    return Number(info.lastInsertRowid);
-  });
+export async function createStock(db, input, now) {
+  await ensureSymbolFree(db, input.symbol, -1);
+  await ensureParentExists(db, input.parentId);
+  const slug = await uniqueSlug(db, slugify(input.name) || input.symbol.toLowerCase());
+  const result = await execute(
+    db,
+    `INSERT INTO stocks (slug, symbol, name, description, url, parent_id, start_price, current_price, listed_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    slug,
+    input.symbol,
+    input.name,
+    input.description,
+    input.url,
+    input.parentId,
+    input.startPrice,
+    input.startPrice,
+    input.listedAt,
+    now.toISOString(),
+  );
+  return Number(result.meta.last_row_id);
 }
 
 /**
  * Änderbar sind Name, Kürzel, Beschreibung, Link und übergeordnetes Projekt.
  * Startkurs und Notierungsdatum bleiben nach dem Anlegen unverändert.
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} id
  * @param {ReturnType<import('./validate.js').validateStockInput>} input
  */
-export function updateStock(db, id, input) {
-  transaction(db, () => {
-    requireStock(db, id);
-    ensureSymbolFree(db, input.symbol, id);
-    ensureParentExists(db, input.parentId);
-    // Zyklen verhindern: Das neue Elternprojekt darf nicht das Projekt selbst oder eines seiner Unterprojekte sein.
-    let cursor = input.parentId;
-    while (cursor !== null) {
-      if (cursor === id) {
-        throw new ApiError(400, 'Ein Projekt kann nicht unter sich selbst oder einem Unterprojekt hängen');
-      }
-      cursor = findStock(db, cursor)?.parent_id ?? null;
+export async function updateStock(db, id, input) {
+  await requireStock(db, id);
+  await ensureSymbolFree(db, input.symbol, id);
+  await ensureParentExists(db, input.parentId);
+  // Zyklen verhindern: Das neue Elternprojekt darf nicht das Projekt selbst oder eines seiner Unterprojekte sein.
+  let cursor = input.parentId;
+  while (cursor !== null) {
+    if (cursor === id) {
+      throw new ApiError(400, 'Ein Projekt kann nicht unter sich selbst oder einem Unterprojekt hängen');
     }
-    db.prepare(
-      'UPDATE stocks SET name = ?, symbol = ?, description = ?, url = ?, parent_id = ? WHERE id = ?',
-    ).run(input.name, input.symbol, input.description, input.url, input.parentId, id);
-  });
+    cursor = (await findStock(db, cursor))?.parent_id ?? null;
+  }
+  await execute(
+    db,
+    'UPDATE stocks SET name = ?, symbol = ?, description = ?, url = ?, parent_id = ? WHERE id = ?',
+    input.name,
+    input.symbol,
+    input.description,
+    input.url,
+    input.parentId,
+    id,
+  );
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} id
  */
-export function deleteStock(db, id) {
-  transaction(db, () => {
-    requireStock(db, id);
-    const children = rows(db, 'SELECT id FROM stocks WHERE parent_id = ?', [id]);
-    if (children.length > 0) {
-      throw new ApiError(409, 'Bitte zuerst die Unterprojekte entfernen oder umhängen');
-    }
-    db.prepare('DELETE FROM stocks WHERE id = ?').run(id);
-  });
+export async function deleteStock(db, id) {
+  await requireStock(db, id);
+  const children = await many(db, 'SELECT id FROM stocks WHERE parent_id = ?', id);
+  if (children.length > 0) {
+    throw new ApiError(409, 'Bitte zuerst die Unterprojekte entfernen oder umhängen');
+  }
+  await execute(db, 'DELETE FROM stocks WHERE id = ?', id);
 }
 
 /**
@@ -280,89 +268,84 @@ function statusFor(occursAt, now) {
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {ReturnType<import('./validate.js').validateEventInput>} input
  * @param {Date} now
- * @returns {number}
+ * @returns {Promise<number>}
  */
-export function createEvent(db, input, now) {
-  return transaction(db, () => {
-    const stock = requireStock(db, input.stockId);
-    ensureEventDate(stock, input.occursAt);
-    const info = db
-      .prepare(
-        `INSERT INTO events (stock_id, title, description, delta, occurs_at, status, price_after, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
-      )
-      .run(
-        stock.id,
-        input.title,
-        input.description,
-        input.delta,
-        input.occursAt,
-        statusFor(input.occursAt, now),
-        now.toISOString(),
-      );
-    recalculateStock(db, stock.id);
-    return Number(info.lastInsertRowid);
-  });
+export async function createEvent(db, input, now) {
+  const stock = await requireStock(db, input.stockId);
+  ensureEventDate(stock, input.occursAt);
+  const result = await execute(
+    db,
+    `INSERT INTO events (stock_id, title, description, delta, occurs_at, status, price_after, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+    stock.id,
+    input.title,
+    input.description,
+    input.delta,
+    input.occursAt,
+    statusFor(input.occursAt, now),
+    now.toISOString(),
+  );
+  await recalculateStock(db, stock.id);
+  return Number(result.meta.last_row_id);
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} id
  * @param {ReturnType<import('./validate.js').validateEventInput>} input
  * @param {Date} now
  */
-export function updateEvent(db, id, input, now) {
-  transaction(db, () => {
-    const event = requireEvent(db, id);
-    const stock = requireStock(db, event.stock_id);
-    ensureEventDate(stock, input.occursAt);
-    db.prepare(
-      `UPDATE events SET title = ?, description = ?, delta = ?, occurs_at = ?, status = ? WHERE id = ?`,
-    ).run(input.title, input.description, input.delta, input.occursAt, statusFor(input.occursAt, now), id);
-    recalculateStock(db, stock.id);
-  });
+export async function updateEvent(db, id, input, now) {
+  const event = await requireEvent(db, id);
+  const stock = await requireStock(db, event.stock_id);
+  ensureEventDate(stock, input.occursAt);
+  await execute(
+    db,
+    `UPDATE events SET title = ?, description = ?, delta = ?, occurs_at = ?, status = ? WHERE id = ?`,
+    input.title,
+    input.description,
+    input.delta,
+    input.occursAt,
+    statusFor(input.occursAt, now),
+    id,
+  );
+  await recalculateStock(db, stock.id);
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} id
  */
-export function deleteEvent(db, id) {
-  transaction(db, () => {
-    const event = requireEvent(db, id);
-    db.prepare('DELETE FROM events WHERE id = ?').run(id);
-    recalculateStock(db, event.stock_id);
-  });
+export async function deleteEvent(db, id) {
+  const event = await requireEvent(db, id);
+  await execute(db, 'DELETE FROM events WHERE id = ?', id);
+  await recalculateStock(db, event.stock_id);
 }
 
 /**
  * Wendet ein geplantes Ereignis sofort an; der Zeitpunkt wird auf „jetzt“ gesetzt.
- * @param {Db} db
+ * @param {D1Database} db
  * @param {number} id
  * @param {Date} now
  */
-export function applyEventNow(db, id, now) {
-  transaction(db, () => {
-    const event = requireEvent(db, id);
-    if (event.status === 'applied') throw new ApiError(409, 'Das Ereignis ist bereits angewendet');
-    db.prepare(`UPDATE events SET status = 'applied', occurs_at = ? WHERE id = ?`).run(now.toISOString(), id);
-    recalculateStock(db, event.stock_id);
-  });
+export async function applyEventNow(db, id, now) {
+  const event = await requireEvent(db, id);
+  if (event.status === 'applied') throw new ApiError(409, 'Das Ereignis ist bereits angewendet');
+  await execute(db, `UPDATE events SET status = 'applied', occurs_at = ? WHERE id = ?`, now.toISOString(), id);
+  await recalculateStock(db, event.stock_id);
 }
 
 /**
  * Lädt den Kursverlauf aller Aktien in einem Durchlauf.
- * @param {Db} db
+ * @param {D1Database} db
  * @param {StockRow[]} stocks
- * @returns {Map<number, Point[]>}
+ * @returns {Promise<Map<number, Point[]>>}
  */
-function loadPointsByStock(db, stocks) {
-  const events = /** @type {EventRow[]} */ (
-    rows(db, `SELECT * FROM events WHERE status = 'applied' ORDER BY occurs_at, id`)
-  );
+async function loadPointsByStock(db, stocks) {
+  const events = castAll(await many(db, `SELECT * FROM events WHERE status = 'applied' ORDER BY occurs_at, id`));
   /** @type {Map<number, EventRow[]>} */
   const byStock = new Map();
   for (const event of events) {
@@ -428,12 +411,12 @@ function toEventView(event) {
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {Date} now
  */
-export function getMarket(db, now = new Date()) {
-  const stocks = /** @type {StockRow[]} */ (rows(db, 'SELECT * FROM stocks ORDER BY symbol'));
-  const points = loadPointsByStock(db, stocks);
+export async function getMarket(db, now = new Date()) {
+  const stocks = castAll(await many(db, 'SELECT * FROM stocks ORDER BY symbol'));
+  const points = await loadPointsByStock(db, stocks);
   const nowMs = now.getTime();
   return {
     generatedAt: now.toISOString(),
@@ -442,34 +425,32 @@ export function getMarket(db, now = new Date()) {
 }
 
 /**
- * @param {Db} db
+ * @param {D1Database} db
  * @param {string} slug
  * @param {Date} now
  */
-export function getStockDetail(db, slug, now = new Date()) {
-  const stock = /** @type {StockRow | undefined} */ (
-    db.prepare('SELECT * FROM stocks WHERE slug = ?').get(slug)
-  );
+export async function getStockDetail(db, slug, now = new Date()) {
+  const stock = cast(await one(db, 'SELECT * FROM stocks WHERE slug = ?', slug));
   if (!stock) return null;
-  const all = /** @type {StockRow[]} */ (rows(db, 'SELECT * FROM stocks ORDER BY symbol'));
-  const points = loadPointsByStock(db, all);
+  const all = castAll(await many(db, 'SELECT * FROM stocks ORDER BY symbol'));
+  const points = await loadPointsByStock(db, all);
   const nowMs = now.getTime();
   const own = points.get(stock.id) ?? [];
   const parent = stock.parent_id !== null ? all.find((s) => s.id === stock.parent_id) : undefined;
   const children = all.filter((s) => s.parent_id === stock.id);
-  const events = /** @type {EventRow[]} */ (
-    rows(
+  const events = castAll(
+    await many(
       db,
       `SELECT * FROM events WHERE stock_id = ? AND status = 'applied' ORDER BY occurs_at DESC, id DESC LIMIT 200`,
-      [stock.id],
-    )
+      stock.id,
+    ),
   );
-  const scheduled = /** @type {EventRow[]} */ (
-    rows(
+  const scheduled = castAll(
+    await many(
       db,
       `SELECT * FROM events WHERE stock_id = ? AND status = 'scheduled' ORDER BY occurs_at, id`,
-      [stock.id],
-    )
+      stock.id,
+    ),
   );
   const summary = toSummary(stock, own, nowMs);
   return {
@@ -485,4 +466,3 @@ export function getStockDetail(db, slug, now = new Date()) {
     scheduled: scheduled.map(toEventView),
   };
 }
-

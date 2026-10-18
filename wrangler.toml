@@ -1,0 +1,18 @@
+name = "cryptstats"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+# Statische Dateien aus public/ werden über den ASSETS-Binding ausgeliefert.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cryptstats"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# Wendet fällige Meilensteine jede Minute an, auch ohne Seitenaufruf.
+[triggers]
+crons = ["* * * * *"]

@@ -1,40 +1,37 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { createApp } from '../src/app.js';
-import { openDatabase } from '../src/db.js';
+import { fileURLToPath } from 'node:url';
+import { openSqliteDatabase } from '../src/sqlite-d1.js';
+import { createAssetFetcher } from '../src/assets.js';
 
-/** @typedef {import('node:sqlite').DatabaseSync} Db */
+/** @typedef {ReturnType<typeof openSqliteDatabase>} TestDatabase */
+/** @typedef {(request: Request) => Promise<Response>} Handler */
 
 const ROOT_NAME = 'root';
 const ROOT_PASSWORD = 'root-passwort-123';
 const ADMIN_PASSWORD = 'admin-passwort-123';
 const VIEWER_PASSWORD = 'viewer-passwort-123';
 const START_CLOCK = new Date('2026-01-01T10:00:00.000Z');
+const ORIGIN = 'https://cryptstats.test';
 
-/** @type {import('node:http').Server} */
-let server;
-let base = '';
-/** @type {Db} */
+/** @type {TestDatabase} */
 let db;
+/** @type {Handler} */
+let app;
 const clock = { now: START_CLOCK };
 
-before(async () => {
-  db = openDatabase(':memory:');
-  const app = createApp({
+before(() => {
+  db = openSqliteDatabase(':memory:');
+  app = createApp({
     db,
-    config: { port: 0, host: '127.0.0.1', dbPath: ':memory:', cookieSecure: false },
+    config: { cookieSecure: false },
+    assets: createAssetFetcher(fileURLToPath(new URL('../public', import.meta.url))),
     now: () => clock.now,
   });
-  server = createServer(app);
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
-  const address = server.address();
-  const port = typeof address === 'object' && address !== null ? address.port : 0;
-  base = `http://127.0.0.1:${port}`;
 });
 
 after(() => {
-  server.close();
   db.close();
 });
 
@@ -49,8 +46,8 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(base + path, init);
-  const text = await res.text();
+  const response = await app(new Request(ORIGIN + path, init));
+  const text = await response.text();
   /** @type {any} */
   let json;
   try {
@@ -58,7 +55,7 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
   } catch {
     json = undefined;
   }
-  return { status: res.status, json, text, headers: res.headers };
+  return { status: response.status, json, text, headers: response.headers };
 }
 
 /**
@@ -176,7 +173,10 @@ describe('login and roles', () => {
   it('lists users for root only', async () => {
     const list = await api('/api/admin/users', { headers: { Cookie: rootCookie } });
     assert.equal(list.status, 200);
-    assert.deepEqual(list.json.users.map((/** @type {{ username: string }} */ u) => u.username).sort(), ['anna', 'lena', 'root']);
+    assert.deepEqual(
+      list.json.users.map((/** @type {{ username: string }} */ u) => u.username).sort(),
+      ['anna', 'lena', 'root'],
+    );
     adminCookie = await login('anna', ADMIN_PASSWORD);
     const denied = await api('/api/admin/users', { headers: { Cookie: adminCookie } });
     assert.equal(denied.status, 403);

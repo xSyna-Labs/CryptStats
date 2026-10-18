@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDatabase } from '../src/db.js';
+import { openSqliteDatabase } from '../src/sqlite-d1.js';
 import {
   applyDueEvents,
   applyEventNow,
@@ -14,7 +14,7 @@ import {
 import { ApiError, validateEventInput, validateStockInput } from '../src/validate.js';
 import { changeSince, clampPrice, sampleValues } from '../src/pricing.js';
 
-/** @typedef {import('node:sqlite').DatabaseSync} Db */
+/** @typedef {ReturnType<typeof openSqliteDatabase>} TestDatabase */
 
 /** @param {string} iso */
 const at = (iso) => new Date(iso);
@@ -24,21 +24,24 @@ const LISTED = at('2025-12-01T00:00:00.000Z');
 // Ein fester „Jetzt“-Zeitpunkt für alle Tests.
 const NOW = at('2026-01-10T10:00:00.000Z');
 
-/** @returns {{ db: Db, stockId: number }} */
-function setup() {
-  const db = openDatabase(':memory:');
-  const input = validateStockInput({ name: 'CryptStats Core', symbol: 'csc', startPrice: 100, listedAt: LISTED.toISOString() }, LISTED);
-  const stockId = createStock(db, input, LISTED);
+/** @returns {Promise<{ db: TestDatabase, stockId: number }>} */
+async function setup() {
+  const db = openSqliteDatabase(':memory:');
+  const input = validateStockInput(
+    { name: 'CryptStats Core', symbol: 'csc', startPrice: 100, listedAt: LISTED.toISOString() },
+    LISTED,
+  );
+  const stockId = await createStock(db, input, LISTED);
   return { db, stockId };
 }
 
 /**
- * @param {Db} db
+ * @param {TestDatabase} db
  * @param {string} slug
  * @param {Date} now
  */
-function detailOf(db, slug, now) {
-  const detail = getStockDetail(db, slug, now);
+async function detailOf(db, slug, now) {
+  const detail = await getStockDetail(db, slug, now);
   assert.ok(detail, `Aktie ${slug} sollte existieren`);
   return detail;
 }
@@ -82,89 +85,139 @@ describe('validation', () => {
 });
 
 describe('milestones and prices', () => {
-  it('applies a positive and a negative milestone to the price', () => {
-    const { db, stockId } = setup();
-    createEvent(db, validateEventInput({ stockId, title: 'Launch', delta: 25, occursAt: '2026-01-02T00:00:00.000Z' }, NOW), NOW);
-    createEvent(db, validateEventInput({ stockId, title: 'Bug-Rückschlag', delta: -10, occursAt: '2026-01-03T00:00:00.000Z' }, NOW), NOW);
-    const stock = detailOf(db, 'cryptstats-core', NOW).stock;
+  it('applies a positive and a negative milestone to the price', async () => {
+    const { db, stockId } = await setup();
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Launch', delta: 25, occursAt: '2026-01-02T00:00:00.000Z' }, NOW),
+      NOW,
+    );
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Bug-Rückschlag', delta: -10, occursAt: '2026-01-03T00:00:00.000Z' }, NOW),
+      NOW,
+    );
+    const stock = (await detailOf(db, 'cryptstats-core', NOW)).stock;
     assert.equal(stock.price, 115);
     assert.equal(stock.stats.milestoneCount, 2);
   });
 
-  it('never drops the price below the minimum', () => {
-    const { db, stockId } = setup();
-    createEvent(db, validateEventInput({ stockId, title: 'Totalschaden', delta: -500, occursAt: '2026-01-02T00:00:00.000Z' }, NOW), NOW);
-    assert.equal(detailOf(db, 'cryptstats-core', NOW).stock.price, 0.01);
+  it('never drops the price below the minimum', async () => {
+    const { db, stockId } = await setup();
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Totalschaden', delta: -500, occursAt: '2026-01-02T00:00:00.000Z' }, NOW),
+      NOW,
+    );
+    assert.equal((await detailOf(db, 'cryptstats-core', NOW)).stock.price, 0.01);
   });
 
-  it('keeps scheduled events out of the price until they are due', () => {
-    const { db, stockId } = setup();
+  it('keeps scheduled events out of the price until they are due', async () => {
+    const { db, stockId } = await setup();
     const release = at('2026-02-01T10:00:00.000Z');
-    createEvent(db, validateEventInput({ stockId, title: 'Release', delta: 40, occursAt: release.toISOString() }, NOW), NOW);
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Release', delta: 40, occursAt: release.toISOString() }, NOW),
+      NOW,
+    );
 
-    const before = detailOf(db, 'cryptstats-core', NOW);
+    const before = await detailOf(db, 'cryptstats-core', NOW);
     assert.equal(before.stock.price, 100);
     assert.equal(before.scheduled.length, 1);
 
-    assert.equal(applyDueEvents(db, at('2026-01-31T23:59:00.000Z')), 0);
-    assert.equal(applyDueEvents(db, release), 1);
-    const after = detailOf(db, 'cryptstats-core', release);
+    assert.equal(await applyDueEvents(db, at('2026-01-31T23:59:00.000Z')), 0);
+    assert.equal(await applyDueEvents(db, release), 1);
+    const after = await detailOf(db, 'cryptstats-core', release);
     assert.equal(after.stock.price, 140);
     assert.equal(after.scheduled.length, 0);
     assert.equal(after.events[0]?.priceAfter, 140);
   });
 
-  it('recalculates the whole chain when a backdated milestone is inserted', () => {
-    const { db, stockId } = setup();
-    createEvent(db, validateEventInput({ stockId, title: 'A', delta: 10, occursAt: '2025-12-05T10:00:00.000Z' }, NOW), NOW);
-    createEvent(db, validateEventInput({ stockId, title: 'B', delta: 10, occursAt: '2025-12-06T10:00:00.000Z' }, NOW), NOW);
-    createEvent(db, validateEventInput({ stockId, title: 'C', delta: -5, occursAt: '2025-12-02T10:00:00.000Z' }, NOW), NOW);
-    const priceByTitle = new Map(detailOf(db, 'cryptstats-core', NOW).events.map((e) => [e.title, e.priceAfter]));
+  it('recalculates the whole chain when a backdated milestone is inserted', async () => {
+    const { db, stockId } = await setup();
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'A', delta: 10, occursAt: '2025-12-05T10:00:00.000Z' }, NOW),
+      NOW,
+    );
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'B', delta: 10, occursAt: '2025-12-06T10:00:00.000Z' }, NOW),
+      NOW,
+    );
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'C', delta: -5, occursAt: '2025-12-02T10:00:00.000Z' }, NOW),
+      NOW,
+    );
+    const priceByTitle = new Map(
+      (await detailOf(db, 'cryptstats-core', NOW)).events.map((event) => [event.title, event.priceAfter]),
+    );
     assert.equal(priceByTitle.get('C'), 95);
     assert.equal(priceByTitle.get('A'), 105);
     assert.equal(priceByTitle.get('B'), 115);
   });
 
-  it('applies a scheduled event immediately on request and sets its time to now', () => {
-    const { db, stockId } = setup();
-    const id = createEvent(db, validateEventInput({ stockId, title: 'Früh', delta: 5, occursAt: '2026-03-01T10:00:00.000Z' }, NOW), NOW);
-    applyEventNow(db, id, NOW);
-    const detail = detailOf(db, 'cryptstats-core', NOW);
+  it('applies a scheduled event immediately on request and sets its time to now', async () => {
+    const { db, stockId } = await setup();
+    const id = await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Früh', delta: 5, occursAt: '2026-03-01T10:00:00.000Z' }, NOW),
+      NOW,
+    );
+    await applyEventNow(db, id, NOW);
+    const detail = await detailOf(db, 'cryptstats-core', NOW);
     assert.equal(detail.stock.price, 105);
     assert.equal(detail.scheduled.length, 0);
   });
 
-  it('refuses milestones before the listing date', () => {
-    const { db, stockId } = setup();
-    assert.throws(
-      () => createEvent(db, validateEventInput({ stockId, title: 'Zu früh', delta: 1, occursAt: '2025-11-30T00:00:00.000Z' }, NOW), NOW),
+  it('refuses milestones before the listing date', async () => {
+    const { db, stockId } = await setup();
+    await assert.rejects(
+      createEvent(
+        db,
+        validateEventInput({ stockId, title: 'Zu früh', delta: 1, occursAt: '2025-11-30T00:00:00.000Z' }, NOW),
+        NOW,
+      ),
       /Notierungsdatum/,
     );
   });
 });
 
 describe('hierarchy and market view', () => {
-  it('lists sub-projects and blocks deleting a parent that still has children', () => {
-    const { db, stockId } = setup();
-    createStock(db, validateStockInput({ name: 'Unterprojekt', symbol: 'SUB', parentId: stockId, listedAt: LISTED.toISOString() }, LISTED), LISTED);
-    const detail = detailOf(db, 'cryptstats-core', NOW);
+  it('lists sub-projects and blocks deleting a parent that still has children', async () => {
+    const { db, stockId } = await setup();
+    await createStock(
+      db,
+      validateStockInput({ name: 'Unterprojekt', symbol: 'SUB', parentId: stockId, listedAt: LISTED.toISOString() }, LISTED),
+      LISTED,
+    );
+    const detail = await detailOf(db, 'cryptstats-core', NOW);
     assert.equal(detail.children.length, 1);
-    assert.throws(() => deleteStock(db, stockId), /Unterprojekte/);
+    await assert.rejects(deleteStock(db, stockId), /Unterprojekte/);
   });
 
-  it('prevents cycles when re-parenting', () => {
-    const { db, stockId } = setup();
-    const childId = createStock(db, validateStockInput({ name: 'Kind', symbol: 'KID', parentId: stockId, listedAt: LISTED.toISOString() }, LISTED), LISTED);
-    assert.throws(
-      () => updateStock(db, stockId, validateStockInput({ name: 'Core', symbol: 'CSC', parentId: childId }, NOW)),
+  it('prevents cycles when re-parenting', async () => {
+    const { db, stockId } = await setup();
+    const childId = await createStock(
+      db,
+      validateStockInput({ name: 'Kind', symbol: 'KID', parentId: stockId, listedAt: LISTED.toISOString() }, LISTED),
+      LISTED,
+    );
+    await assert.rejects(
+      updateStock(db, stockId, validateStockInput({ name: 'Core', symbol: 'CSC', parentId: childId }, NOW)),
       /Unterprojekt/,
     );
   });
 
-  it('builds the market list with sparklines and 24h changes', () => {
-    const { db, stockId } = setup();
-    createEvent(db, validateEventInput({ stockId, title: 'Heute', delta: 10, occursAt: new Date(NOW.getTime() - 1000).toISOString() }, NOW), NOW);
-    const market = getMarket(db, NOW);
+  it('builds the market list with sparklines and 24h changes', async () => {
+    const { db, stockId } = await setup();
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Heute', delta: 10, occursAt: new Date(NOW.getTime() - 1000).toISOString() }, NOW),
+      NOW,
+    );
+    const market = await getMarket(db, NOW);
     assert.equal(market.stocks.length, 1);
     assert.equal(market.stocks[0]?.price, 110);
     assert.equal(market.stocks[0]?.change24h, 10);

@@ -1,7 +1,4 @@
 // @ts-check
-import { readFile, stat } from 'node:fs/promises';
-import { extname, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   applyDueEvents,
   applyEventNow,
@@ -36,23 +33,12 @@ import {
   updateUser,
 } from './users.js';
 
-/** @typedef {import('node:http').IncomingMessage} Req */
-/** @typedef {import('node:http').ServerResponse} Res */
-/** @typedef {import('node:sqlite').DatabaseSync} Db */
-/** @typedef {import('./config.js').Config} Config */
+/** @typedef {import('./types.js').D1Database} D1Database */
+/** @typedef {import('./types.js').AssetFetcher} AssetFetcher */
+/** @typedef {{ cookieSecure: boolean }} Config */
 /** @typedef {import('./auth.js').CurrentUser} CurrentUser */
 
-const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MAX_BODY_BYTES = 64 * 1024;
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=utf-8',
-};
 
 /** @returns {Record<string, string>} */
 function securityHeaders() {
@@ -66,36 +52,52 @@ function securityHeaders() {
 }
 
 /**
- * @param {Res} res
- * @param {number} status
- * @param {unknown} data
+ * @param {Response} response
+ * @returns {Response}
  */
-function sendJson(res, status, data) {
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    ...securityHeaders(),
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(securityHeaders())) headers.set(name, value);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
-  res.end(JSON.stringify(data));
 }
 
 /**
- * @param {Req} req
+ * @param {number} status
+ * @param {unknown} data
+ * @param {Record<string, string>} [extraHeaders]
+ */
+function json(status, data, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...securityHeaders(),
+      ...extraHeaders,
+    },
+  });
+}
+
+/**
+ * @param {Request} request
  * @returns {Promise<Record<string, unknown>>}
  */
-async function readJson(req) {
-  const type = req.headers['content-type'] ?? '';
+async function readJson(request) {
+  const type = request.headers.get('content-type') ?? '';
   if (!type.startsWith('application/json')) throw new ApiError(415, 'Erwartet JSON (Content-Type)');
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new ApiError(413, 'Anfrage ist zu groß');
-    chunks.push(chunk);
+  const declared = Number(request.headers.get('content-length') ?? '0');
+  if (declared > MAX_BODY_BYTES) throw new ApiError(413, 'Anfrage ist zu groß');
+  const text = await request.text();
+  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
+    throw new ApiError(413, 'Anfrage ist zu groß');
   }
   let parsed;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
+    parsed = JSON.parse(text || 'null');
   } catch {
     throw new ApiError(400, 'Ungültiges JSON');
   }
@@ -104,26 +106,25 @@ async function readJson(req) {
 
 /**
  * Blockiert Cross-Origin-Schreibzugriffe (zusätzlich zu SameSite=Strict).
- * @param {Req} req
+ * @param {Request} request
+ * @param {URL} url
  */
-function assertSameOrigin(req) {
-  const origin = req.headers.origin;
+function assertSameOrigin(request, url) {
+  const origin = request.headers.get('origin');
   if (!origin) return;
-  let originHost;
+  let originUrl;
   try {
-    originHost = new URL(origin).host;
+    originUrl = new URL(origin);
   } catch {
     throw new ApiError(403, 'Ungültiger Origin-Header');
   }
-  if (originHost !== req.headers.host) throw new ApiError(403, 'Anfrage von fremder Herkunft blockiert');
+  if (originUrl.host !== url.host) throw new ApiError(403, 'Anfrage von fremder Herkunft blockiert');
 }
 
-/**
- * @param {string} path
- * @param {RegExp} pattern
- */
-function match(path, pattern) {
-  return path.match(pattern);
+/** @param {string} path */
+function looksLikeFile(path) {
+  const last = path.split('/').pop() ?? '';
+  return last.includes('.');
 }
 
 /** @param {CurrentUser} user */
@@ -132,264 +133,257 @@ function publicUser(user) {
 }
 
 /**
- * @param {{ db: Db, config: Config, now?: () => Date }} deps
+ * @param {{ db: D1Database, config: Config, assets?: AssetFetcher, now?: () => Date }} deps
  */
-export function createApp({ db, config, now = () => new Date() }) {
+export function createApp({ db, config, assets, now = () => new Date() }) {
   const limiter = new LoginLimiter();
 
   /**
-   * @param {Req} req
+   * @param {Request} request
    * @param {Date} current
-   * @returns {CurrentUser | null}
+   * @returns {Promise<CurrentUser | null>}
    */
-  function currentUser(req, current) {
-    return getSessionUser(db, getCookie(req.headers.cookie, SESSION_COOKIE), current);
+  async function currentUser(request, current) {
+    return getSessionUser(db, getCookie(request.headers.get('cookie') ?? undefined, SESSION_COOKIE), current);
   }
 
   /**
-   * @param {Req} req
-   * @param {Res} res
+   * @param {Request} request
    * @param {URL} url
-   */
-  async function handleApi(req, res, url) {
-    const method = req.method ?? 'GET';
-    const path = url.pathname;
-    const current = now();
-    applyDueEvents(db, current);
-
-    if (method !== 'GET' && method !== 'HEAD') assertSameOrigin(req);
-
-    if (method === 'GET' && path === '/api/market') {
-      return sendJson(res, 200, getMarket(db, current));
-    }
-
-    const stockMatch = match(path, /^\/api\/stocks\/([a-z0-9-]+)$/);
-    if (stockMatch && method === 'GET') {
-      const detail = getStockDetail(db, stockMatch[1] ?? '', current);
-      if (!detail) throw new ApiError(404, 'Aktie nicht gefunden');
-      return sendJson(res, 200, detail);
-    }
-
-    if (path.startsWith('/api/auth/')) {
-      return handleAuth(req, res, path, method, current);
-    }
-
-    if (path.startsWith('/api/admin/')) {
-      const user = currentUser(req, current);
-      if (!user) throw new ApiError(401, 'Nicht angemeldet');
-      return handleAdmin(req, res, path, method, current, user);
-    }
-
-    throw new ApiError(404, 'Nicht gefunden');
-  }
-
-  /**
-   * @param {Req} req
-   * @param {Res} res
-   * @param {string} path
-   * @param {string} method
    * @param {Date} current
    */
-  async function handleAuth(req, res, path, method, current) {
+  async function handleAuth(request, url, current) {
+    const method = request.method;
+    const path = url.pathname;
+
     if (method === 'GET' && path === '/api/auth/status') {
-      return sendJson(res, 200, {
-        setupRequired: countUsers(db) === 0,
-        user: (() => {
-          const user = currentUser(req, current);
-          return user ? publicUser(user) : null;
-        })(),
+      const user = await currentUser(request, current);
+      return json(200, {
+        setupRequired: (await countUsers(db)) === 0,
+        user: user ? publicUser(user) : null,
       });
     }
 
     if (method === 'POST' && path === '/api/auth/setup') {
-      const body = await readJson(req);
+      const body = await readJson(request);
       // Die Ersteinrichtung legt immer ein Root-Konto an und ist nur einmal möglich.
-      const id = await createUser(db, { username: body.username, password: body.password, role: 'root' }, { onlyIfEmpty: true, now: current });
-      const user = { id, username: String(body.username).trim().toLowerCase(), role: /** @type {const} */ ('root') };
-      const { token, expiresAt } = createSession(db, id, current);
-      res.setHeader('Set-Cookie', sessionCookie(token, expiresAt, config.cookieSecure));
-      return sendJson(res, 201, { user });
+      const id = await createUser(
+        db,
+        { username: body.username, password: body.password, role: 'root' },
+        { onlyIfEmpty: true, now: current },
+      );
+      const user = {
+        id,
+        username: String(body.username).trim().toLowerCase(),
+        role: /** @type {const} */ ('root'),
+      };
+      const { token, expiresAt } = await createSession(db, id, current);
+      return json(201, { user }, { 'Set-Cookie': sessionCookie(token, expiresAt, config.cookieSecure) });
     }
 
     if (method === 'POST' && path === '/api/auth/login') {
-      const ip = req.socket.remoteAddress ?? 'unknown';
+      const ip = request.headers.get('cf-connecting-ip') ?? 'unknown';
       if (limiter.isBlocked(ip, current)) {
         throw new ApiError(429, 'Zu viele Fehlversuche. Bitte später erneut versuchen.');
       }
-      const body = await readJson(req);
+      const body = await readJson(request);
       const user = await authenticate(db, body.username, body.password);
       if (!user) {
         limiter.recordFailure(ip, current);
         throw new ApiError(401, 'Benutzername oder Passwort ist falsch');
       }
       limiter.reset(ip);
-      const { token, expiresAt } = createSession(db, user.id, current);
-      res.setHeader('Set-Cookie', sessionCookie(token, expiresAt, config.cookieSecure));
-      return sendJson(res, 200, { user: publicUser(user) });
+      const { token, expiresAt } = await createSession(db, user.id, current);
+      return json(200, { user: publicUser(user) }, {
+        'Set-Cookie': sessionCookie(token, expiresAt, config.cookieSecure),
+      });
     }
 
     if (method === 'POST' && path === '/api/auth/logout') {
-      destroySession(db, getCookie(req.headers.cookie, SESSION_COOKIE));
-      res.setHeader('Set-Cookie', clearSessionCookie(config.cookieSecure));
-      return sendJson(res, 200, { ok: true });
+      await destroySession(db, getCookie(request.headers.get('cookie') ?? undefined, SESSION_COOKIE));
+      return json(200, { ok: true }, { 'Set-Cookie': clearSessionCookie(config.cookieSecure) });
     }
 
     if (method === 'POST' && path === '/api/auth/password') {
-      const user = currentUser(req, current);
+      const user = await currentUser(request, current);
       if (!user) throw new ApiError(401, 'Nicht angemeldet');
-      const body = await readJson(req);
+      const body = await readJson(request);
       await changeOwnPassword(db, user.id, body.currentPassword, body.newPassword);
-      res.setHeader('Set-Cookie', clearSessionCookie(config.cookieSecure));
-      return sendJson(res, 200, { ok: true });
+      return json(200, { ok: true }, { 'Set-Cookie': clearSessionCookie(config.cookieSecure) });
     }
 
     throw new ApiError(404, 'Nicht gefunden');
   }
 
   /**
-   * @param {Req} req
-   * @param {Res} res
-   * @param {string} path
-   * @param {string} method
+   * @param {Request} request
+   * @param {URL} url
    * @param {Date} current
    * @param {CurrentUser} user
    */
-  async function handleAdmin(req, res, path, method, current, user) {
+  async function handleAdmin(request, url, current, user) {
+    const method = request.method;
+    const path = url.pathname;
+
     if (path === '/api/admin/users' || path.startsWith('/api/admin/users/')) {
       if (user.role !== 'root') throw new ApiError(403, 'Nur das Root-Konto darf Benutzer verwalten');
-      return handleUsers(req, res, path, method, user);
+      return handleUsers(request, url, user);
     }
 
-    if (method !== 'GET' && !canWrite(user.role)) {
+    if (method !== 'GET' && method !== 'HEAD' && !canWrite(user.role)) {
       throw new ApiError(403, 'Mit dieser Rolle ist nur Lesezugriff möglich');
     }
 
     let m;
     if (method === 'POST' && path === '/api/admin/stocks') {
-      const input = validateStockInput(await readJson(req), current);
-      const id = createStock(db, input, current);
-      return sendJson(res, 201, { id });
+      const input = validateStockInput(await readJson(request), current);
+      const id = await createStock(db, input, current);
+      return json(201, { id });
     }
-    if ((m = match(path, /^\/api\/admin\/stocks\/(\d+)$/))) {
+    if ((m = path.match(/^\/api\/admin\/stocks\/(\d+)$/))) {
       const id = Number(m[1]);
       if (method === 'PUT') {
-        const input = validateStockInput(await readJson(req), current);
-        updateStock(db, id, input);
-        return sendJson(res, 200, { ok: true });
+        const input = validateStockInput(await readJson(request), current);
+        await updateStock(db, id, input);
+        return json(200, { ok: true });
       }
       if (method === 'DELETE') {
-        deleteStock(db, id);
-        return sendJson(res, 200, { ok: true });
+        await deleteStock(db, id);
+        return json(200, { ok: true });
       }
     }
     if (method === 'POST' && path === '/api/admin/events') {
-      const input = validateEventInput(await readJson(req), current);
-      const id = createEvent(db, input, current);
-      return sendJson(res, 201, { id });
+      const input = validateEventInput(await readJson(request), current);
+      const id = await createEvent(db, input, current);
+      return json(201, { id });
     }
-    if ((m = match(path, /^\/api\/admin\/events\/(\d+)$/))) {
+    if ((m = path.match(/^\/api\/admin\/events\/(\d+)$/))) {
       const id = Number(m[1]);
       if (method === 'PUT') {
-        const input = validateEventInput(await readJson(req), current);
-        updateEvent(db, id, input, current);
-        return sendJson(res, 200, { ok: true });
+        const input = validateEventInput(await readJson(request), current);
+        await updateEvent(db, id, input, current);
+        return json(200, { ok: true });
       }
       if (method === 'DELETE') {
-        deleteEvent(db, id);
-        return sendJson(res, 200, { ok: true });
+        await deleteEvent(db, id);
+        return json(200, { ok: true });
       }
     }
-    if (method === 'POST' && (m = match(path, /^\/api\/admin\/events\/(\d+)\/apply$/))) {
-      applyEventNow(db, Number(m[1]), current);
-      return sendJson(res, 200, { ok: true });
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/events\/(\d+)\/apply$/))) {
+      await applyEventNow(db, Number(m[1]), current);
+      return json(200, { ok: true });
     }
     throw new ApiError(404, 'Nicht gefunden');
   }
 
   /**
-   * @param {Req} req
-   * @param {Res} res
-   * @param {string} path
-   * @param {string} method
+   * @param {Request} request
+   * @param {URL} url
    * @param {CurrentUser} actor
    */
-  async function handleUsers(req, res, path, method, actor) {
-    if (method === 'GET' && path === '/api/admin/users') {
-      return sendJson(res, 200, { users: listUsers(db) });
+  async function handleUsers(request, url, actor) {
+    const method = request.method;
+    if (method === 'GET' && url.pathname === '/api/admin/users') {
+      return json(200, { users: await listUsers(db) });
     }
-    if (method === 'POST' && path === '/api/admin/users') {
-      const body = await readJson(req);
+    if (method === 'POST' && url.pathname === '/api/admin/users') {
+      const body = await readJson(request);
       const id = await createUser(db, { username: body.username, password: body.password, role: body.role });
-      return sendJson(res, 201, { id });
+      return json(201, { id });
     }
-    const m = match(path, /^\/api\/admin\/users\/(\d+)$/);
+    const m = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
     if (m) {
       const id = Number(m[1]);
       if (method === 'PUT') {
-        const body = await readJson(req);
+        const body = await readJson(request);
         await updateUser(db, id, { role: body.role, password: body.password });
-        return sendJson(res, 200, { ok: true });
+        return json(200, { ok: true });
       }
       if (method === 'DELETE') {
-        deleteUser(db, id, actor.id);
-        return sendJson(res, 200, { ok: true });
+        await deleteUser(db, id, actor.id);
+        return json(200, { ok: true });
       }
     }
     throw new ApiError(404, 'Nicht gefunden');
   }
 
   /**
-   * @param {Req} req
-   * @param {Res} res
-   * @param {string} pathname
+   * @param {Request} request
+   * @param {URL} url
+   * @param {Date} current
    */
-  async function serveStatic(req, res, pathname) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') throw new ApiError(405, 'Methode nicht erlaubt');
-    let relative;
-    try {
-      relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
-    } catch {
-      throw new ApiError(400, 'Ungültiger Pfad');
+  async function handleApi(request, url, current) {
+    const method = request.method;
+    const path = url.pathname;
+    await applyDueEvents(db, current);
+
+    if (method !== 'GET' && method !== 'HEAD') assertSameOrigin(request, url);
+
+    if (method === 'GET' && path === '/api/market') {
+      return json(200, await getMarket(db, current));
     }
-    const file = resolve(PUBLIC_DIR, relative);
-    if (file !== PUBLIC_DIR && !file.startsWith(PUBLIC_DIR + sep)) throw new ApiError(404, 'Nicht gefunden');
-    let target = file;
-    try {
-      const info = await stat(target);
-      if (!info.isFile()) throw new Error('keine Datei');
-    } catch {
-      // Unbekannte Pfade ohne Dateiendung liefern die Startseite (Client-Routing).
-      if (extname(relative) !== '') throw new ApiError(404, 'Nicht gefunden');
-      target = resolve(PUBLIC_DIR, 'index.html');
+
+    const stockMatch = path.match(/^\/api\/stocks\/([a-z0-9-]+)$/);
+    if (stockMatch && method === 'GET') {
+      const detail = await getStockDetail(db, stockMatch[1] ?? '', current);
+      if (!detail) throw new ApiError(404, 'Aktie nicht gefunden');
+      return json(200, detail);
     }
-    const data = await readFile(target);
-    res.writeHead(200, {
-      'Content-Type': MIME[/** @type {keyof typeof MIME} */ (extname(target))] ?? 'application/octet-stream',
-      'Cache-Control': 'no-cache',
-      ...securityHeaders(),
-    });
-    res.end(req.method === 'HEAD' ? undefined : data);
+
+    if (path.startsWith('/api/auth/')) {
+      return handleAuth(request, url, current);
+    }
+
+    if (path.startsWith('/api/admin/')) {
+      const user = await currentUser(request, current);
+      if (!user) throw new ApiError(401, 'Nicht angemeldet');
+      return handleAdmin(request, url, current, user);
+    }
+
+    throw new ApiError(404, 'Nicht gefunden');
   }
 
   /**
-   * @param {Req} req
-   * @param {Res} res
+   * @param {Request} request
+   * @param {URL} url
    */
-  return async function handle(req, res) {
+  async function serveStatic(request, url) {
+    if (!assets) {
+      return new Response('Nicht gefunden', {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...securityHeaders() },
+      });
+    }
+    const response = await assets.fetch(request);
+    if (response.status !== 404) return withSecurityHeaders(response);
+    // Unbekannte Pfade ohne Dateiendung liefern die Startseite (Client-Routing über den Hash).
+    if (looksLikeFile(url.pathname)) {
+      return new Response('Nicht gefunden', {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...securityHeaders() },
+      });
+    }
+    const indexUrl = new URL('/', url);
+    const index = await assets.fetch(
+      new Request(indexUrl.toString(), { method: request.method, headers: request.headers }),
+    );
+    return withSecurityHeaders(index);
+  }
+
+  /** @param {Request} request */
+  return async function handle(request) {
+    const url = new URL(request.url);
     try {
-      const url = new URL(req.url ?? '/', 'http://localhost');
       if (url.pathname.startsWith('/api/')) {
-        await handleApi(req, res, url);
-      } else {
-        await serveStatic(req, res, url.pathname);
+        return await handleApi(request, url, now());
       }
+      return await serveStatic(request, url);
     } catch (err) {
       if (err instanceof ApiError) {
-        sendJson(res, err.status, { error: err.message });
-      } else {
-        console.error(err);
-        sendJson(res, 500, { error: 'Interner Serverfehler' });
+        return json(err.status, { error: err.message });
       }
+      console.error(err);
+      return json(500, { error: 'Interner Serverfehler' });
     }
   };
 }

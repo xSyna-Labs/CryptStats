@@ -1,6 +1,6 @@
 {
   "name": "cryptstats",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CryptStats – Projekte als Krypto-Aktien. Meilensteine treiben den Kurs.",
   "type": "module",
   "private": true,
@@ -9,13 +9,18 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/server.js",
-    "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply cryptstats --local",
+    "db:migrate": "wrangler d1 migrations apply cryptstats --remote",
+    "start": "node src/server.js",
+    "dev:node": "node --watch src/server.js"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wrangler": "^4.151.1"
   }
 }
