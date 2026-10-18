@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CryptStats – Projekt-Aktien</title>
+  <meta name="description" content="CryptStats: Open-Source-Projekte als Krypto-Aktien. Meilensteine treiben den Kurs.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><span class="logo" aria-hidden="true">◆</span> CryptStats</a>
+    <nav>
+      <a href="#/">Markt</a>
+      <a href="#/admin">Admin</a>
+    </nav>
+    <div class="account" id="account"></div>
+  </header>
+
+  <div class="ticker" id="ticker" hidden></div>
+
+  <main id="app" class="container">
+    <p class="muted">Lade Daten …</p>
+  </main>
+
+  <footer class="footer">
+    CryptStats · Kurse werden durch dokumentierte Meilensteine bestimmt ·
+    <span id="live-status" class="live">live</span>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

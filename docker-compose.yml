@@ -1,0 +1,14 @@
+services:
+  cryptstats:
+    build: .
+    image: cryptstats:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - cryptstats-data:/data
+
+volumes:
+  cryptstats-data:
