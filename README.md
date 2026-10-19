@@ -82,11 +82,24 @@ Dateisystem gibt es dort nicht.
 
 ## Lokal starten
 
+**Docker braucht auf dem Host kein Node.** `docker compose up -d --build` im geklonten
+Verzeichnis genügt. Ist das Verzeichnis schon vorhanden, nicht erneut klonen, sondern
+aktualisieren:
+
+```bash
+cd cryptstats
+git pull
+```
+
+Nur für die **native** Variante (Entwicklung, Tests) wird **Node 22.13 oder neuer**
+gebraucht: `node:sqlite` existiert erst ab Node 22.5. Mit Node 18/20 bricht der Start mit
+`No such built-in module: node:sqlite` ab – der Server prüft das beim Start und nennt die
+nötige Version. `npm install` installiert nur TypeScript und wrangler, also reine
+Entwicklungswerkzeuge:
+
 ```bash
 git clone https://github.com/xsyna-labs/cryptstats cryptstats
 cd cryptstats
-
-# Docker-Variante (Node)
 npm install
 npm start            # http://localhost:3000, DB in data/cryptstats.db
 npm run dev:node     # mit Auto-Reload

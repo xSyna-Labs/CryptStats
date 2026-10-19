@@ -1,4 +1,6 @@
 // @ts-check
+// Muss vor allen anderen Imports stehen: prüft die Node-Version, bevor node:sqlite geladen wird.
+import './require-node.js';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
