@@ -10,6 +10,12 @@ const RANGES = [
   ['1J', 365],
   ['MAX', null],
 ];
+const SORT_OPTIONS = [
+  ['price', -1, 'Kurs (hoch zuerst)'],
+  ['changePct24h', -1, '24 h (+ zuerst)'],
+  ['symbol', 1, 'Kürzel (A–Z)'],
+  ['name', 1, 'Name (A–Z)'],
+];
 const UP = '#16c784';
 const DOWN = '#ea3943';
 const ROLE_LABELS = { root: 'Root', admin: 'Admin', viewer: 'Lesend' };
@@ -18,7 +24,8 @@ const state = {
   token: 0,
   refresh: null,
   market: null,
-  sort: { key: 'symbol', dir: 1 },
+  // Der teuerste Kurs steht ohne Klick oben.
+  sort: { key: 'price', dir: -1 },
   filter: '',
   range: '1M',
   stock: null,
@@ -39,6 +46,14 @@ const timeFormat = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '
 const dayFormat = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
 
 const fmtPrice = (n) => numberFormat.format(n);
+const wholeNumber = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 });
+/** Kompakte Achsenbeschriftung, damit auch große Kurse in den Rand passen. */
+const fmtAxis = (n) => {
+  const abs = Math.abs(n);
+  if (abs >= 1e6) return `${wholeNumber.format(n / 1e6)} Mio.`;
+  if (abs >= 1e4) return `${wholeNumber.format(n / 1e3)}k`;
+  return numberFormat.format(n);
+};
 const fmtSigned = (n) => (n > 0 ? '+' : '') + numberFormat.format(n);
 const fmtPct = (n) => (n > 0 ? '+' : '') + numberFormat.format(n) + ' %';
 const fmtDate = (iso) => dateTimeFormat.format(new Date(iso));
@@ -145,6 +160,11 @@ async function viewMarket() {
     <section class="card">
       <div class="toolbar">
         <input id="filter" type="search" placeholder="Name oder Kürzel suchen" aria-label="Aktien filtern" value="${esc(state.filter)}">
+        <label class="mobile-sort">Sortieren
+          <select id="market-sort" aria-label="Markt sortieren">
+            ${SORT_OPTIONS.map(([key, dir, label]) => `<option value="${key}:${dir}">${label}</option>`).join('')}
+          </select>
+        </label>
       </div>
       <div id="market-table" class="table-wrap"></div>
     </section>`;
@@ -162,10 +182,12 @@ function drawHero() {
   const stocks = state.market.stocks;
   const gainers = stocks.filter((s) => s.changePct24h > 0).length;
   const losers = stocks.filter((s) => s.changePct24h < 0).length;
+  const leader = stocks.reduce((best, s) => (!best || s.price > best.price ? s : best), null);
   el.innerHTML = [
     ['Projekte', String(stocks.length)],
     ['Steigend (24 h)', `<span class="up">${gainers}</span>`],
     ['Fallend (24 h)', `<span class="down">${losers}</span>`],
+    ['Höchster Kurs', leader ? `${fmtPrice(leader.price)} <span class="muted small">${esc(leader.symbol)}</span>` : '–'],
   ]
     .map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`)
     .join('');
@@ -224,8 +246,11 @@ function drawMarketTable() {
     return `<th class="${numeric ? 'num' : ''}"><button type="button" data-sort="${sortKey}">${label}${indicator}</button></th>`;
   };
 
+  const sortSelect = $('#market-sort');
+  if (sortSelect) sortSelect.value = `${key}:${dir}`;
+
   el.innerHTML = rows.length
-    ? `<table>
+    ? `<table class="market-table">
         <thead><tr>
           ${header('Kürzel', 'symbol')}
           ${header('Name', 'name')}
@@ -277,12 +302,14 @@ function drawChart() {
   const points = history.map((p) => ({ t: Date.parse(p.t), price: p.price, event: p.event }));
   const pts = buildSeries(points, stock.price, from, now);
 
-  const W = 800;
-  const H = 320;
-  const L = 64;
-  const R = 12;
-  const T = 16;
-  const B = 28;
+  // In echten Pixeln zeichnen: so bleibt die Achsenschrift auch auf dem Handy lesbar.
+  const W = Math.max(280, Math.round(el.clientWidth || 800));
+  const compact = W < 520;
+  const H = Math.round(Math.min(360, Math.max(210, W * (compact ? 0.62 : 0.45))));
+  const L = compact ? 52 : 64;
+  const R = 10;
+  const T = 18;
+  const B = 26;
   const values = pts.map((p) => p.price);
   let lo = Math.min(...values);
   let hi = Math.max(...values);
@@ -292,9 +319,10 @@ function drawChart() {
   const x = (t) => L + ((t - from) / Math.max(now - from, 1)) * (W - L - R);
   const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
 
+  // Diagonale Verbindungen statt Treppenstufen – so sieht es wie ein echter Kursverlauf aus.
   let line = `M${x(pts[0].t).toFixed(1)} ${y(pts[0].price).toFixed(1)}`;
   for (let i = 1; i < pts.length; i++) {
-    line += ` H${x(pts[i].t).toFixed(1)} V${y(pts[i].price).toFixed(1)}`;
+    line += ` L${x(pts[i].t).toFixed(1)} ${y(pts[i].price).toFixed(1)}`;
   }
   const area = `${line} V${H - B} H${x(pts[0].t).toFixed(1)} Z`;
   const cls = dirClass(stock.price - pts[0].price);
@@ -304,16 +332,22 @@ function drawChart() {
     .map((i) => {
       const v = lo + ((hi - lo) * i) / 3;
       return `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
-              <text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${fmtPrice(v)}</text>`;
+              <text class="axis" x="${L - 7}" y="${y(v) + 4}" text-anchor="end">${fmtAxis(v)}</text>`;
     })
     .join('');
 
   const axisLabel = (t) => (days !== null && days <= 1 ? timeFormat.format(t) : dayFormat.format(t));
-  const xLabels = [
-    [from, 'start'],
-    [(from + now) / 2, 'middle'],
-    [now, 'end'],
-  ]
+  const ticks = compact
+    ? [
+        [from, 'start'],
+        [now, 'end'],
+      ]
+    : [
+        [from, 'start'],
+        [(from + now) / 2, 'middle'],
+        [now, 'end'],
+      ];
+  const xLabels = ticks
     .map(([t, anchor]) => `<text class="axis" x="${x(t)}" y="${H - 8}" text-anchor="${anchor}">${axisLabel(t)}</text>`)
     .join('');
 
@@ -321,6 +355,13 @@ function drawChart() {
     .filter((p) => p.event)
     .map((p) => `<circle class="dot ${dirClass(p.event.delta)}" cx="${x(p.t)}" cy="${y(p.price)}" r="4.5"/>`)
     .join('');
+
+  const last = pts[pts.length - 1];
+  const lastX = x(last.t).toFixed(1);
+  const lastY = y(last.price).toFixed(1);
+  const lastMarker = `
+      <line class="last-line" x1="${L}" x2="${W - R}" y1="${lastY}" y2="${lastY}"/>
+      <circle class="last-dot ${cls}" cx="${lastX}" cy="${lastY}" r="4"/>`;
 
   el.innerHTML = `
     <svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kursverlauf von ${esc(stock.name)}">
@@ -333,6 +374,7 @@ function drawChart() {
       ${grid}
       <path d="${area}" fill="url(#chart-area)"/>
       <path class="line ${cls}" d="${line}" fill="none"/>
+      ${lastMarker}
       ${dots}
       <line class="cross" id="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" hidden/>
       <circle class="hover-dot" id="hover" r="5" cx="0" cy="0" hidden/>
@@ -367,7 +409,9 @@ function drawChart() {
     hover.setAttribute('cy', String(y(p.price)));
     hover.removeAttribute('hidden');
     tip.hidden = false;
-    tip.style.left = `${(px / W) * r.width}px`;
+    const tipWidth = Math.min(220, r.width * 0.8);
+    const pointer = (px / W) * r.width;
+    tip.style.left = `${Math.max(tipWidth / 2, Math.min(pointer, r.width - tipWidth / 2))}px`;
     tip.innerHTML = `<strong>${fmtPrice(p.price)} ${UNIT}</strong><br><span class="muted">${fmtDate(new Date(p.t).toISOString())}</span>${
       p.event ? `<br>${esc(p.event.title)} <span class="${dirClass(p.event.delta)}">${fmtSigned(p.event.delta)}</span>` : ''
     }`;
@@ -594,6 +638,7 @@ function usersHtml() {
     <section class="card">
       <h2>Benutzer</h2>
       <p class="hint">Root: alles inklusive Benutzerverwaltung · Admin: Aktien und Ereignisse · Lesend: nur einsehen.</p>
+      <p class="hint scroll-hint">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
       <div id="admin-users" class="table-wrap"></div>
       <h3>Neues Konto</h3>
       <form id="user-form" class="stack">
@@ -632,6 +677,7 @@ async function renderConsole(token) {
     ${write ? stockFormsHtml() : ''}
     <section class="card">
       <h2>Aktien</h2>
+      <p class="hint scroll-hint">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
       <div id="admin-stocks" class="table-wrap"></div>
     </section>
     <section class="card">
@@ -641,6 +687,7 @@ async function renderConsole(token) {
           <select id="event-stock-filter"></select>
         </label>
       </div>
+      <p class="hint scroll-hint">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
       <div id="admin-events" class="table-wrap"></div>
     </section>
     ${isRoot ? usersHtml() : ''}`;
@@ -993,6 +1040,12 @@ document.addEventListener('submit', async (event) => {
 document.addEventListener('change', async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLSelectElement)) return;
+  if (target.id === 'market-sort') {
+    const [key, dir] = target.value.split(':');
+    state.sort = { key, dir: Number(dir) };
+    drawMarketTable();
+    return;
+  }
   if (target.id === 'event-stock-filter') {
     state.admin.eventStockId = Number(target.value);
     const formSelect = $('#event-form [name="stockId"]');
@@ -1115,6 +1168,15 @@ function route() {
 }
 
 window.addEventListener('hashchange', route);
+
+// Der Chart zeichnet in Pixeln: bei Größenänderung (Rotation, Fenster) neu berechnen.
+let chartResizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(() => {
+    if (state.stock && document.querySelector('#chart')) drawChart();
+  }, 150);
+});
 
 setInterval(async () => {
   if (document.hidden) return;

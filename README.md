@@ -1,3 +1,5 @@
+<img src="public/logo.svg" alt="CryptStats-Logo" width="56" align="right">
+
 # CryptStats
 
 Projekte als Krypto-Aktien: Meilensteine treiben den Kurs. Marktübersicht, Detailseiten mit
