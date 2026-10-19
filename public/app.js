@@ -1,6 +1,6 @@
 // CryptStats – Client. Kein Build-Schritt, nur Browser-JavaScript.
 
-const UNIT = 'Coins';
+const UNIT = 'Punkte';
 const REFRESH_MS = 30000;
 const DAY = 86400000;
 const RANGES = [
@@ -86,6 +86,20 @@ function toast(message, isError = false) {
 }
 
 /* ---------- Konto & Anmeldestatus ---------- */
+
+/** Zeigt die Version des laufenden Servers – so ist ein alter Stand sofort erkennbar. */
+async function loadVersion() {
+  const el = $('#app-version');
+  if (!el) return;
+  try {
+    const info = await api('/api/version');
+    const label = `v${info.version}`;
+    el.textContent = label;
+    el.title = `Installierte Version: ${info.version}`;
+  } catch {
+    // Die statische Version aus index.html bleibt stehen.
+  }
+}
 
 async function loadAuth() {
   const status = await api('/api/auth/status');
@@ -1189,11 +1203,7 @@ setInterval(async () => {
 }, REFRESH_MS);
 
 (async () => {
-  try {
-    await loadAuth();
-  } catch {
-    // Ohne Status läuft die Seite ohne Konto weiter.
-  }
+  await Promise.allSettled([loadVersion(), loadAuth()]);
   if (state.setupRequired && location.hash !== '#/admin') {
     location.hash = '#/admin';
   } else {

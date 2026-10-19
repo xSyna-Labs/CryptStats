@@ -3,3 +3,22 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: same-origin
   X-Frame-Options: DENY
+  X-CryptStats-Version: 1.2.0
+
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
+/app.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/style.css
+  Cache-Control: public, max-age=31536000, immutable
+
+/logo.svg
+  Cache-Control: public, max-age=31536000, immutable
+
+/logo-180.png
+  Cache-Control: public, max-age=31536000, immutable

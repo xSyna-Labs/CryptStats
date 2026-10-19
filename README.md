@@ -5,6 +5,8 @@
 Projekte als Krypto-Aktien: Meilensteine treiben den Kurs. Marktübersicht, Detailseiten mit
 Kursverlauf und ein Admin-Bereich mit Rollen (Root, Admin, Lesend).
 
+Aktuelle Version: **1.2.0** – Änderungen stehen in [CHANGELOG.md](CHANGELOG.md).
+
 Ein Codebase, zwei Betriebsarten:
 
 | | Docker / privater Server | Cloudflare Workers |
@@ -31,9 +33,9 @@ Updates und Neustarts.
 Ohne Compose:
 
 ```bash
-docker build -t cryptstats:1.1.0 .
+docker build -t cryptstats:1.2.0 .
 docker run -d --name cryptstats --restart unless-stopped \
-  -p 3000:3000 -v cryptstats-data:/data cryptstats:1.1.0
+  -p 3000:3000 -v cryptstats-data:/data cryptstats:1.2.0
 ```
 
 **HTTPS:** Läuft die Seite hinter Caddy, nginx oder Traefik, `COOKIE_SECURE=true` setzen
@@ -54,6 +56,28 @@ docker cp cryptstats:/data/backup.db ./cryptstats-backup.db
 
 **Zurücksetzen:** Volume löschen (`docker compose down -v`); beim nächsten Start werden die
 Tabellen aus `migrations/` neu angelegt.
+
+## Versionen & Updates
+
+Die laufende Version steht im Footer jeder Seite (verlinkt auf die Releases), im Header
+`X-CryptStats-Version` und unter `GET /api/version`:
+
+```bash
+curl -s https://stats.xSyna.de/api/version   # {"version":"1.2.0"}
+```
+
+CSS, JavaScript und Logo werden mit `?v=<Version>` eingebunden, `index.html` selbst wird nicht
+gecacht. Nach einem Update ändern sich diese URLs, damit Browser und Cloudflare nicht die alte
+Datei ausliefern. Erscheint im Footer noch die alte Nummer, läuft auf dem Server noch der alte
+Stand:
+
+```bash
+git pull && docker compose up -d --build   # Docker
+git pull && npx wrangler deploy            # Cloudflare
+```
+
+Beim Erhöhen der Version müssen `package.json`, [src/version.js](src/version.js) und die
+`?v=`-Angaben in [public/index.html](public/index.html) zusammenpassen; `npm test` prüft das.
 
 ## Cloudflare Workers
 
@@ -139,6 +163,7 @@ Anmeldung lesbar; nur der Admin-Bereich verlangt ein Konto.
 
 | Methode | Pfad | Zugriff |
 | --- | --- | --- |
+| `GET` | `/api/version` | öffentlich |
 | `GET` | `/api/market` | öffentlich |
 | `GET` | `/api/stocks/:slug` | öffentlich |
 | `GET` | `/api/auth/status` | öffentlich |
@@ -171,7 +196,7 @@ Alle schreibenden Anfragen brauchen `Content-Type: application/json`. Ein fremde
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node:test, 38 Tests
+npm test            # node:test, 41 Tests
 ```
 
 Die Tests laufen gegen den produktiven SQLite-Adapter (`src/sqlite-d1.js`) und rufen den
@@ -192,6 +217,7 @@ src/sqlite-d1.js  SQLite-Adapter mit D1-API (Docker)
 src/assets.js     Datei-Auslieferung für Docker
 src/pricing.js    Kurslogik
 src/validate.js   Eingabeprüfung
+src/version.js    Versionsnummer (Footer, /api/version, Cache-Busting)
 migrations/       Schema für D1 und SQLite
 public/           Frontend ohne Build-Schritt
 tests/            Tests

@@ -9,6 +9,7 @@ import { createAssetFetcher } from './assets.js';
 import { openSqliteDatabase } from './sqlite-d1.js';
 import { applyDueEvents } from './store.js';
 import { countUsers } from './users.js';
+import { VERSION } from './version.js';
 
 /** @typedef {import('node:http').IncomingMessage} Incoming */
 /** @typedef {import('node:http').ServerResponse} ServerResponse */
@@ -115,7 +116,7 @@ export async function startServer(config = loadServerConfig()) {
   await new Promise((resolvePromise) => server.listen(config.port, config.host, () => resolvePromise(undefined)));
 
   const users = await countUsers(db);
-  console.log(`CryptStats läuft auf http://${config.host}:${config.port}`);
+  console.log(`CryptStats v${VERSION} läuft auf http://${config.host}:${config.port}`);
   console.log(`Datenbank: ${config.dbPath}`);
   if (users === 0) {
     console.log('Ersteinrichtung: /#/admin öffnen und das Root-Konto anlegen.');

@@ -12,6 +12,7 @@ import {
   updateStock,
 } from './store.js';
 import { ApiError, asObject, validateEventInput, validateStockInput } from './validate.js';
+import { VERSION } from './version.js';
 import {
   canWrite,
   clearSessionCookie,
@@ -48,6 +49,7 @@ function securityHeaders() {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'same-origin',
     'X-Frame-Options': 'DENY',
+    'X-CryptStats-Version': VERSION,
   };
 }
 
@@ -315,6 +317,12 @@ export function createApp({ db, config, assets, now = () => new Date() }) {
   async function handleApi(request, url, current) {
     const method = request.method;
     const path = url.pathname;
+
+    // Öffentlich und ohne Datenbankzugriff: zeigt, welcher Stand wirklich läuft.
+    if (method === 'GET' && path === '/api/version') {
+      return json(200, { version: VERSION });
+    }
+
     await applyDueEvents(db, current);
 
     if (method !== 'GET' && method !== 'HEAD') assertSameOrigin(request, url);

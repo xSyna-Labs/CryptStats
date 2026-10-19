@@ -44,11 +44,15 @@ export function createAssetFetcher(rootDir) {
       if (file !== root && !file.startsWith(root + sep)) return notFound();
       try {
         const data = await readFile(file);
+        const ext = extname(file);
         /** @type {Record<string, string>} */
         const headers = {
-          'Content-Type': MIME[/** @type {keyof typeof MIME} */ (extname(file))] ?? 'application/octet-stream',
+          'Content-Type': MIME[/** @type {keyof typeof MIME} */ (ext)] ?? 'application/octet-stream',
         };
-        if (extname(file) === '.html') headers['Cache-Control'] = 'public, max-age=0, must-revalidate';
+        // HTML nie cachen, Assets mit ?v=<Version> dürfen dauerhaft im Cache bleiben.
+        if (ext === '.html') headers['Cache-Control'] = 'no-cache';
+        else if (url.searchParams.has('v')) headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+        else headers['Cache-Control'] = 'public, max-age=0, must-revalidate';
         return new Response(data, { headers });
       } catch {
         return notFound();
