@@ -228,6 +228,16 @@ form.stack .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
 .roadmap-item.done .roadmap-status { color: var(--up); }
 .roadmap-item.doing .roadmap-status { color: var(--accent); }
 .roadmap-item.planned .roadmap-status { color: var(--muted); }
+.roadmap-item.done { border-left: 3px solid var(--up); }
+.roadmap-item.doing { border-left: 3px solid var(--accent); }
+.roadmap-item.planned { border-left: 3px dashed var(--border); }
+.roadmap-item .actions { margin-top: 0.4rem; }
+.roadmap-item .actions select { width: auto; min-height: 0; padding: 0.25rem 0.5rem; font-size: 0.82rem; }
+.roadmap-item p { line-height: 1.45; }
+.card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem 1rem; margin-bottom: 0.6rem; }
+.card-head h2 { margin: 0; }
+.csv-export { margin: 0.75rem 0 0; font-size: 0.88rem; }
+.csv-export a { color: var(--accent-2); }
 .toast {
   position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--card-2); border: 1px solid var(--accent-2);
   border-radius: 10px; padding: 0.7rem 1rem; box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 50;

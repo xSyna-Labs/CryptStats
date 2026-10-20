@@ -1,6 +1,6 @@
 {
   "name": "cryptstats",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "CryptStats – Projekte als Krypto-Aktien. Meilensteine treiben den Kurs.",
   "type": "module",
   "private": true,

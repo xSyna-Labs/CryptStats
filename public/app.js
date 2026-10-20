@@ -486,7 +486,7 @@ function statCard(label, value) {
 }
 
 function drawStock() {
-  const { stock: s, parent, children, events, scheduled } = state.stock;
+  const { stock: s, parent, children, events, scheduled, roadmap } = state.stock;
   const cls = s.price < 0 ? 'down' : dirClass(s.change24h);
   const perf = s.stats.performancePct;
   $('#app').innerHTML = `
@@ -509,6 +509,7 @@ function drawStock() {
         ${RANGES.map(([label]) => `<button type="button" data-range="${label}" class="${label === state.range ? 'active' : ''}">${label}</button>`).join('')}
       </div>
       <div class="chart" id="chart"></div>
+      <p class="csv-export"><a href="/api/stocks/${enc(s.slug)}/history.csv" download>Kursverlauf als CSV herunterladen</a></p>
     </section>
 
     <section class="grid-stats">
@@ -530,6 +531,15 @@ function drawStock() {
         ${scheduled.length ? `<ul class="events">${scheduled.map((e) => eventItem(e, true)).join('')}</ul>` : '<p class="empty">Keine geplanten Ereignisse.</p>'}
       </section>
     </div>
+
+    <section class="card">
+      <h2>RoadMap</h2>
+      ${
+        roadmap.length
+          ? `<ul class="roadmap">${roadmap.map(roadmapItem).join('')}</ul>`
+          : '<p class="empty">Noch keine RoadMap-Einträge für diese Aktie.</p>'
+      }
+    </section>
 
     <section class="card">
       <h2>Über das Projekt</h2>
@@ -737,6 +747,12 @@ async function renderConsole(token) {
       <p class="hint scroll-hint">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
       <div id="admin-events" class="table-wrap"></div>
     </section>
+    <section class="card">
+      <h2>RoadMap</h2>
+      <p class="hint">Die RoadMap gehört zur Aktie, die oben unter „Ereignisse“ ausgewählt ist.</p>
+      <div id="admin-roadmap"></div>
+      ${write ? roadmapFormHtml() : ''}
+    </section>
     ${isRoot ? usersHtml() : ''}`;
 
   if (write) {
@@ -800,6 +816,7 @@ async function refreshAdmin(token) {
   const selected = stocks.find((s) => s.id === state.admin.eventStockId);
   state.admin.detail = selected ? await api(`/api/stocks/${enc(selected.slug)}`) : null;
   drawAdminEvents();
+  drawAdminRoadmap();
 }
 
 function drawAdminStocks(stocks) {
@@ -974,6 +991,24 @@ function startEditEvent(id) {
 
 /* ---------- Ereignisse & Delegation ---------- */
 
+// Status eines RoadMap-Eintrags direkt im Select ändern.
+document.addEventListener('change', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement) || target.dataset.action !== 'roadmap-status') return;
+  const item = state.admin.detail?.roadmap.find((r) => r.id === Number(target.dataset.id));
+  if (!item) return;
+  try {
+    await api(`/api/admin/roadmap/${item.id}`, {
+      method: 'PUT',
+      body: { title: item.title, text: item.text, status: target.value },
+    });
+    toast('Status aktualisiert');
+    await refreshAdmin(state.token);
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
 document.addEventListener('submit', async (event) => {
   const form = event.target;
   if (!(form instanceof HTMLFormElement)) return;
@@ -1004,6 +1039,29 @@ document.addEventListener('submit', async (event) => {
         body: { username: form.elements.username.value, password: form.elements.password.value },
       });
       await viewAdmin();
+    } catch (err) {
+      errorEl.textContent = err.message;
+    }
+    return;
+  }
+
+  if (form.id === 'roadmap-form') {
+    const errorEl = $('#roadmap-error');
+    errorEl.textContent = '';
+    const f = form.elements;
+    const stockId = state.admin.eventStockId;
+    if (!stockId) {
+      errorEl.textContent = 'Bitte zuerst eine Aktie auswählen';
+      return;
+    }
+    try {
+      await api(`/api/admin/stocks/${stockId}/roadmap`, {
+        method: 'POST',
+        body: { title: f.title.value, text: f.text.value, status: f.status.value },
+      });
+      form.reset();
+      toast('RoadMap-Eintrag hinzugefügt');
+      await refreshAdmin(state.token);
     } catch (err) {
       errorEl.textContent = err.message;
     }
@@ -1191,6 +1249,11 @@ document.addEventListener('click', async (event) => {
       await api(`/api/admin/events/${id}/apply`, { method: 'POST', body: {} });
       toast('Ereignis sofort angewendet');
       await refreshAdmin(state.token);
+    } else if (action === 'delete-roadmap') {
+      if (!confirm('RoadMap-Eintrag wirklich löschen?')) return;
+      await api(`/api/admin/roadmap/${id}`, { method: 'DELETE' });
+      toast('RoadMap-Eintrag gelöscht');
+      await refreshAdmin(state.token);
     } else if (action === 'delete-event') {
       if (!confirm('Ereignis wirklich löschen? Die Kurse werden neu berechnet.')) return;
       await api(`/api/admin/events/${id}`, { method: 'DELETE' });
@@ -1214,35 +1277,97 @@ document.addEventListener('click', async (event) => {
 
 /* ---------- RoadMap ---------- */
 
-/** Status: done = erledigt, doing = in Arbeit, planned = geplant. Hier pflegen. */
-const ROADMAP = [
-  { status: 'done', title: 'Projekt-Aktien mit Kursverlauf', text: 'Kurse, Zeiträume und Meilensteine (+/−) als Chart.' },
-  { status: 'done', title: 'Geplante Ereignisse', text: 'Meilensteine mit Zukunftsdatum werden automatisch angewendet.' },
-  { status: 'done', title: 'Benutzerrollen', text: 'Root, Admin und Lesend mit eigener Berechtigung.' },
-  { status: 'done', title: 'Negative Kurse', text: 'Kurse dürfen unter null fallen; sie werden rot dargestellt.' },
-  { status: 'doing', title: 'Mobile Oberfläche & PWA', text: 'Bessere Bedienung auf dem Smartphone, installierbar mit App-Icon.' },
-  { status: 'doing', title: 'Einfachere Admin-Verwaltung', text: 'Schnellaktionen direkt an der Aktie und übersichtlichere Formulare.' },
-  { status: 'planned', title: 'Benachrichtigungen', text: 'Hinweis bei größeren Kursbewegungen.' },
-  { status: 'planned', title: 'Export der Kursdaten', text: 'Kursverläufe als CSV herunterladen.' },
-];
+/** Status: done = erledigt, doing = in Arbeit, planned = geplant. */
 const ROADMAP_LABELS = { done: 'Erledigt', doing: 'In Arbeit', planned: 'Geplant' };
 
+/** @param {{ status: string, title: string, text: string }} item */
+function roadmapItem(item) {
+  return `<li class="roadmap-item ${esc(item.status)}">
+    <span class="tag roadmap-status">${ROADMAP_LABELS[item.status] ?? ''}</span>
+    <div><strong>${esc(item.title)}</strong>${item.text ? `<p class="muted">${esc(item.text)}</p>` : ''}</div>
+  </li>`;
+}
+
+function roadmapFormHtml() {
+  return `
+    <h3>Neuer RoadMap-Eintrag</h3>
+    <form id="roadmap-form" class="stack">
+      <label>Titel<input name="title" required maxlength="120"></label>
+      <label>Text<textarea name="text" maxlength="500"></textarea></label>
+      <label>Status<select name="status">
+        <option value="planned">Geplant</option>
+        <option value="doing">In Arbeit</option>
+        <option value="done">Erledigt</option>
+      </select></label>
+      <div class="actions"><button class="primary" type="submit">Eintrag hinzufügen</button></div>
+      <p class="error" id="roadmap-error" role="alert"></p>
+    </form>`;
+}
+
+function drawAdminRoadmap() {
+  const el = $('#admin-roadmap');
+  if (!el) return;
+  const detail = state.admin.detail;
+  if (!detail) {
+    el.innerHTML = '<p class="empty">Noch keine Aktie vorhanden.</p>';
+    return;
+  }
+  const items = detail.roadmap;
+  if (!items.length) {
+    el.innerHTML = '<p class="empty">Noch keine RoadMap-Einträge für diese Aktie.</p>';
+    return;
+  }
+  const write = canEdit();
+  el.innerHTML = `<ul class="roadmap">${items
+    .map(
+      (item) => `<li class="roadmap-item ${esc(item.status)}">
+        <div><strong>${esc(item.title)}</strong>${item.text ? `<p class="muted">${esc(item.text)}</p>` : ''}</div>
+        ${
+          write
+            ? `<div class="actions">
+                <select data-action="roadmap-status" data-id="${item.id}" aria-label="Status">
+                  ${Object.entries(ROADMAP_LABELS)
+                    .map(([value, label]) => `<option value="${value}" ${value === item.status ? 'selected' : ''}>${label}</option>`)
+                    .join('')}
+                </select>
+                <button type="button" class="danger" data-action="delete-roadmap" data-id="${item.id}">Löschen</button>
+              </div>`
+            : `<span class="tag roadmap-status">${ROADMAP_LABELS[item.status] ?? ''}</span>`
+        }
+      </li>`,
+    )
+    .join('')}</ul>`;
+}
+
 async function viewRoadmap() {
-  state.token++;
+  const token = ++state.token;
   state.refresh = null;
+  let data;
+  try {
+    data = await api('/api/roadmap');
+  } catch (err) {
+    if (token !== state.token) return;
+    $('#app').innerHTML = `<section class="card"><h1>RoadMap</h1><p class="error">${esc(err.message)}</p></section>`;
+    return;
+  }
+  if (token !== state.token) return;
   $('#app').innerHTML = `
     <section class="card">
       <h1>RoadMap</h1>
-      <p class="muted">Woran CryptStats gerade arbeitet und was als Nächstes kommt.</p>
+      <p class="muted">Woran die einzelnen Projekt-Aktien gerade arbeiten und was als Nächstes kommt.</p>
     </section>
-    <section class="card">
-      <ul class="roadmap">${ROADMAP.map(
-        (item) => `<li class="roadmap-item ${item.status}">
-          <span class="tag roadmap-status">${ROADMAP_LABELS[item.status]}</span>
-          <div><strong>${esc(item.title)}</strong><p class="muted">${esc(item.text)}</p></div>
-        </li>`,
-      ).join('')}</ul>
-    </section>`;
+    ${
+      data.stocks.length
+        ? data.stocks
+            .map(
+              (s) => `<section class="card">
+                <h2><a href="#/stock/${enc(s.slug)}">${esc(s.name)}</a> <span class="badge">${esc(s.symbol)}</span></h2>
+                <ul class="roadmap">${s.items.map(roadmapItem).join('')}</ul>
+              </section>`,
+            )
+            .join('')
+        : '<section class="card"><p class="empty">Noch keine RoadMap-Einträge.</p></section>'
+    }`;
 }
 
 /* ---------- Router & Start ---------- */

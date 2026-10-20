@@ -108,6 +108,21 @@ export function validateStockInput(input, now) {
   return { name, symbol, description, url, parentId, startPrice, listedAt };
 }
 
+/** Erlaubte Status einer RoadMap-Zeile. */
+export const ROADMAP_STATUSES = /** @type {const} */ (['done', 'doing', 'planned']);
+
+/** @param {unknown} input */
+export function validateRoadmapInput(input) {
+  const body = asObject(input);
+  const title = readText(body, 'title', { label: 'Titel', max: 120, required: true });
+  const text = readText(body, 'text', { label: 'Text', max: 500 });
+  const status = body.status ?? 'planned';
+  if (typeof status !== 'string' || !ROADMAP_STATUSES.some((s) => s === status)) {
+    throw new ApiError(400, 'Status muss erledigt, in Arbeit oder geplant sein');
+  }
+  return { title, text, status: /** @type {'done' | 'doing' | 'planned'} */ (status) };
+}
+
 /**
  * @param {unknown} input
  * @param {Date} now

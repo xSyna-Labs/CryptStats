@@ -5,4 +5,4 @@
  * weil Cloudflare Workers sie nicht zur Laufzeit lesen können; ein Test hält beide
  * Werte und die versionierten Asset-URLs in index.html synchron.
  */
-export const VERSION = '1.4.0';
+export const VERSION = '1.5.0';

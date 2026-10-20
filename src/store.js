@@ -453,6 +453,7 @@ export async function getStockDetail(db, slug, now = new Date()) {
     ),
   );
   const summary = toSummary(stock, own, nowMs);
+  const roadmap = (await loadRoadmapByStock(db, stock.id)).get(stock.id) ?? [];
   return {
     stock: { ...summary, stats: historyStats(own, stock.current_price) },
     parent: parent ? toSummary(parent, points.get(parent.id) ?? [], nowMs) : null,
@@ -464,5 +465,137 @@ export async function getStockDetail(db, slug, now = new Date()) {
     })),
     events: events.map(toEventView),
     scheduled: scheduled.map(toEventView),
+    roadmap,
   };
+}
+
+/**
+ * @typedef {object} RoadmapRow
+ * @property {number} id
+ * @property {number} stock_id
+ * @property {string} title
+ * @property {string} text
+ * @property {'done' | 'doing' | 'planned'} status
+ * @property {string} created_at
+ */
+
+/**
+ * @param {RoadmapRow} row
+ */
+function toRoadmapView(row) {
+  return { id: row.id, stockId: row.stock_id, title: row.title, text: row.text, status: row.status };
+}
+
+/**
+ * Lädt alle RoadMap-Einträge in einem Durchlauf, gruppiert nach Aktie.
+ * @param {D1Database} db
+ * @param {number} [stockId]
+ * @returns {Promise<Map<number, ReturnType<typeof toRoadmapView>[]>>}
+ */
+async function loadRoadmapByStock(db, stockId) {
+  const rows = castAll(
+    stockId === undefined
+      ? await many(db, 'SELECT * FROM roadmap_items ORDER BY id')
+      : await many(db, 'SELECT * FROM roadmap_items WHERE stock_id = ? ORDER BY id', stockId),
+  );
+  /** @type {Map<number, ReturnType<typeof toRoadmapView>[]>} */
+  const byStock = new Map();
+  for (const row of rows) {
+    const list = byStock.get(row.stock_id) ?? [];
+    list.push(toRoadmapView(row));
+    byStock.set(row.stock_id, list);
+  }
+  return byStock;
+}
+
+/**
+ * Alle Aktien mit ihrer RoadMap, für die Übersichtsseite.
+ * @param {D1Database} db
+ */
+export async function getRoadmapOverview(db) {
+  const stocks = castAll(await many(db, 'SELECT * FROM stocks ORDER BY symbol'));
+  const byStock = await loadRoadmapByStock(db);
+  return stocks
+    .map((s) => ({
+      id: s.id,
+      slug: s.slug,
+      symbol: s.symbol,
+      name: s.name,
+      items: byStock.get(s.id) ?? [],
+    }))
+    .filter((s) => s.items.length > 0);
+}
+
+/**
+ * @param {D1Database} db
+ * @param {number} stockId
+ * @param {ReturnType<import('./validate.js').validateRoadmapInput>} input
+ * @param {Date} now
+ */
+export async function createRoadmapItem(db, stockId, input, now) {
+  await requireStock(db, stockId);
+  const result = await execute(
+    db,
+    'INSERT INTO roadmap_items (stock_id, title, text, status, created_at) VALUES (?, ?, ?, ?, ?)',
+    stockId,
+    input.title,
+    input.text,
+    input.status,
+    now.toISOString(),
+  );
+  return Number(result.meta.last_row_id);
+}
+
+/**
+ * @param {D1Database} db
+ * @param {number} id
+ * @param {ReturnType<import('./validate.js').validateRoadmapInput>} input
+ */
+export async function updateRoadmapItem(db, id, input) {
+  const row = await one(db, 'SELECT id FROM roadmap_items WHERE id = ?', id);
+  if (!row) throw new ApiError(404, 'RoadMap-Eintrag nicht gefunden');
+  await execute(
+    db,
+    'UPDATE roadmap_items SET title = ?, text = ?, status = ? WHERE id = ?',
+    input.title,
+    input.text,
+    input.status,
+    id,
+  );
+}
+
+/**
+ * @param {D1Database} db
+ * @param {number} id
+ */
+export async function deleteRoadmapItem(db, id) {
+  const row = await one(db, 'SELECT id FROM roadmap_items WHERE id = ?', id);
+  if (!row) throw new ApiError(404, 'RoadMap-Eintrag nicht gefunden');
+  await execute(db, 'DELETE FROM roadmap_items WHERE id = ?', id);
+}
+
+/**
+ * Kursverlauf als CSV (Zeitpunkt in UTC, Kurs, Ereignis, Wert).
+ * @param {D1Database} db
+ * @param {string} slug
+ * @param {Date} now
+ * @returns {Promise<string | null>}
+ */
+export async function getHistoryCsv(db, slug, now = new Date()) {
+  const detail = await getStockDetail(db, slug, now);
+  if (!detail) return null;
+  /** @param {unknown} value */
+  const cell = (value) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    // Formeln in Tabellenkalkulationen verhindern, Anführungszeichen escapen.
+    const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+    return /[";,\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
+  const lines = ['zeitpunkt_utc,kurs,ereignis,wert'];
+  for (const point of detail.history) {
+    lines.push(
+      [point.t, point.price, point.event?.title ?? '', point.event?.delta ?? ''].map(cell).join(','),
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }

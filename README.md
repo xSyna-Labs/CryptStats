@@ -5,7 +5,7 @@
 Projekte als Krypto-Aktien: Meilensteine treiben den Kurs. Marktübersicht, Detailseiten mit
 Kursverlauf und ein Admin-Bereich mit Rollen (Root, Admin, Lesend).
 
-Aktuelle Version: **1.4.0** – Änderungen stehen in [CHANGELOG.md](CHANGELOG.md).
+Aktuelle Version: **1.5.0** – Änderungen stehen in [CHANGELOG.md](CHANGELOG.md).
 
 Ein Codebase, zwei Betriebsarten:
 
@@ -33,9 +33,9 @@ Updates und Neustarts.
 Ohne Compose:
 
 ```bash
-docker build -t cryptstats:1.4.0 .
+docker build -t cryptstats:1.5.0 .
 docker run -d --name cryptstats --restart unless-stopped \
-  -p 3000:3000 -v cryptstats-data:/data cryptstats:1.4.0
+  -p 3000:3000 -v cryptstats-data:/data cryptstats:1.5.0
 ```
 
 **HTTPS:** Läuft die Seite hinter Caddy, nginx oder Traefik, `COOKIE_SECURE=true` setzen
@@ -63,7 +63,7 @@ Die laufende Version steht im Footer jeder Seite (verlinkt auf die Releases), im
 `X-CryptStats-Version` und unter `GET /api/version`:
 
 ```bash
-curl -s https://stats.xSyna.de/api/version   # {"version":"1.4.0"}
+curl -s https://stats.xSyna.de/api/version   # {"version":"1.5.0"}
 ```
 
 CSS, JavaScript und Logo werden mit `?v=<Version>` eingebunden, `index.html` selbst wird nicht

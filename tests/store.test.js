@@ -5,13 +5,20 @@ import {
   applyDueEvents,
   applyEventNow,
   createEvent,
+  createRoadmapItem,
   createStock,
   deleteStock,
   getMarket,
+  getRoadmapOverview,
   getStockDetail,
   updateStock,
 } from '../src/store.js';
-import { ApiError, validateEventInput, validateStockInput } from '../src/validate.js';
+import {
+  ApiError,
+  validateEventInput,
+  validateRoadmapInput,
+  validateStockInput,
+} from '../src/validate.js';
 import { changeSince, roundPrice, sampleValues } from '../src/pricing.js';
 
 /** @typedef {ReturnType<typeof openSqliteDatabase>} TestDatabase */
@@ -255,5 +262,25 @@ describe('hierarchy and market view', () => {
     assert.equal(market.stocks[0]?.price, 110);
     assert.equal(market.stocks[0]?.change24h, 10);
     assert.ok((market.stocks[0]?.spark.length ?? 0) >= 2);
+  });
+
+  it('keeps a separate RoadMap per stock', async () => {
+    const { db, stockId } = await setup();
+    const otherId = await createStock(
+      db,
+      validateStockInput({ name: 'Other Project', symbol: 'OTH', startPrice: 50, listedAt: LISTED.toISOString() }, LISTED),
+      LISTED,
+    );
+    await createRoadmapItem(db, stockId, validateRoadmapInput({ title: 'Core v2', status: 'doing' }), NOW);
+    await createRoadmapItem(db, otherId, validateRoadmapInput({ title: 'Erster Release', status: 'done' }), NOW);
+
+    const core = await detailOf(db, 'cryptstats-core', NOW);
+    const other = await detailOf(db, 'other-project', NOW);
+    assert.deepEqual(core.roadmap.map((r) => [r.title, r.status]), [['Core v2', 'doing']]);
+    assert.deepEqual(other.roadmap.map((r) => [r.title, r.status]), [['Erster Release', 'done']]);
+
+    const overview = await getRoadmapOverview(db);
+    assert.equal(overview.find((s) => s.symbol === 'OTH')?.items.length, 1);
+    assert.equal(overview.find((s) => s.symbol === 'CSC')?.items.length, 1);
   });
 });

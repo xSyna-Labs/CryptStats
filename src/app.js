@@ -3,15 +3,26 @@ import {
   applyDueEvents,
   applyEventNow,
   createEvent,
+  createRoadmapItem,
   createStock,
   deleteEvent,
+  deleteRoadmapItem,
   deleteStock,
+  getHistoryCsv,
   getMarket,
+  getRoadmapOverview,
   getStockDetail,
   updateEvent,
+  updateRoadmapItem,
   updateStock,
 } from './store.js';
-import { ApiError, asObject, validateEventInput, validateStockInput } from './validate.js';
+import {
+  ApiError,
+  asObject,
+  validateEventInput,
+  validateRoadmapInput,
+  validateStockInput,
+} from './validate.js';
 import { VERSION } from './version.js';
 import {
   canWrite,
@@ -271,6 +282,23 @@ export function createApp({ db, config, assets, now = () => new Date() }) {
         return json(200, { ok: true });
       }
     }
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/stocks\/(\d+)\/roadmap$/))) {
+      const input = validateRoadmapInput(await readJson(request));
+      const id = await createRoadmapItem(db, Number(m[1]), input, current);
+      return json(201, { id });
+    }
+    if ((m = path.match(/^\/api\/admin\/roadmap\/(\d+)$/))) {
+      const id = Number(m[1]);
+      if (method === 'PUT') {
+        const input = validateRoadmapInput(await readJson(request));
+        await updateRoadmapItem(db, id, input);
+        return json(200, { ok: true });
+      }
+      if (method === 'DELETE') {
+        await deleteRoadmapItem(db, id);
+        return json(200, { ok: true });
+      }
+    }
     if (method === 'POST' && (m = path.match(/^\/api\/admin\/events\/(\d+)\/apply$/))) {
       await applyEventNow(db, Number(m[1]), current);
       return json(200, { ok: true });
@@ -331,11 +359,30 @@ export function createApp({ db, config, assets, now = () => new Date() }) {
       return json(200, await getMarket(db, current));
     }
 
+    if (method === 'GET' && path === '/api/roadmap') {
+      return json(200, { stocks: await getRoadmapOverview(db) });
+    }
+
     const stockMatch = path.match(/^\/api\/stocks\/([a-z0-9-]+)$/);
     if (stockMatch && method === 'GET') {
       const detail = await getStockDetail(db, stockMatch[1] ?? '', current);
       if (!detail) throw new ApiError(404, 'Aktie nicht gefunden');
       return json(200, detail);
+    }
+
+    const csvMatch = path.match(/^\/api\/stocks\/([a-z0-9-]+)\/history\.csv$/);
+    if (csvMatch && method === 'GET') {
+      const csv = await getHistoryCsv(db, csvMatch[1] ?? '', current);
+      if (csv === null) throw new ApiError(404, 'Aktie nicht gefunden');
+      return new Response(csv, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${csvMatch[1]}-kursverlauf.csv"`,
+          'Cache-Control': 'no-store',
+          ...securityHeaders(),
+        },
+      });
     }
 
     if (path.startsWith('/api/auth/')) {

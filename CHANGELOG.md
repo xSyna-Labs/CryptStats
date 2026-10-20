@@ -3,11 +3,22 @@
 Alle nennenswerten Änderungen an CryptStats. Die Version steht im Footer der Seite, unter
 `GET /api/version` und im HTTP-Header `X-CryptStats-Version`.
 
+## 1.5.0 – 2026-10-20
+
+### Neu
+
+- **RoadMap je Aktie**: Jede Aktie hat ihre eigenen RoadMap-Einträge (Migration `0002_roadmap.sql`). Die Detailseite zeigt sie, Admins pflegen sie im Admin-Bereich bei der jeweiligen Aktie (anlegen, Status ändern, löschen). `GET /api/roadmap` liefert alle Aktien mit ihrer RoadMap.
+- **CSV-Export** des Kursverlaufs direkt auf der Detailseite (`/api/stocks/{slug}/history.csv`).
+
+### Design
+
+- Einheitlicher Kartenkopf, farbige Statusmarkierung an den RoadMap-Einträgen, bessere Abstände und Tooltip in Theme-Farben.
+
 ## 1.4.0 – 2026-10-20
 
 ### Neu
 
-- **RoadMap**-Abschnitt (`#/roadmap`) mit Status Erledigt, In Arbeit und Geplant; die Einträge stehen in `ROADMAP` in `public/app.js`.
+- **RoadMap**-Abschnitt (`#/roadmap`) mit Status Erledigt, In Arbeit und Geplant; die Einträge stehen in `ROADMAP_LABELS` in `public/app.js`.
 - **PWA**: Web-App-Manifest mit App-Icons (192 px, 512 px, SVG), installierbar auf dem Startbildschirm; Service Worker (`/sw.js`) startet die Oberfläche auch offline. API-Antworten werden nie zwischengespeichert.
 
 ### Geändert

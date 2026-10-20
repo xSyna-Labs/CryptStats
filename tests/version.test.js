@@ -108,7 +108,7 @@ describe('versioning', () => {
 
     const source = await read('../public/app.js');
     assert.match(source, /parts\[0\] === 'roadmap'/);
-    assert.match(source, /const ROADMAP = \[/);
+    assert.match(source, /const ROADMAP_LABELS = \{/);
   });
 
   it('supports negative prices and colors negative chart values red', async () => {
