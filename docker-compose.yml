@@ -1,7 +1,7 @@
 services:
   cryptstats:
     build: .
-    image: cryptstats:1.2.0
+    image: cryptstats:1.4.0
     restart: unless-stopped
     ports:
       - "3000:3000"

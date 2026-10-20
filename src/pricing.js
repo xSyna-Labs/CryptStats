@@ -1,7 +1,5 @@
 // @ts-check
 
-/** Kleinster möglicher Kurs. Ein Rückschlag kann den Kurs nie unter diesen Wert drücken. */
-export const MIN_PRICE = 0.01;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -15,8 +13,8 @@ export function round2(n) {
 }
 
 /** @param {number} n */
-export function clampPrice(n) {
-  return Math.max(MIN_PRICE, round2(n));
+export function roundPrice(n) {
+  return round2(n);
 }
 
 /**
@@ -60,7 +58,7 @@ export function buildSeries(points, currentPrice, from, to) {
 export function changeSince(points, currentPrice, nowMs) {
   const reference = priceAt(points, nowMs - DAY_MS);
   const change = round2(currentPrice - reference);
-  const changePct = reference === 0 ? 0 : round2(((currentPrice - reference) / reference) * 100);
+  const changePct = reference === 0 ? 0 : round2(((currentPrice - reference) / Math.abs(reference)) * 100);
   return { reference, change, changePct };
 }
 
@@ -74,7 +72,7 @@ export function historyStats(points, currentPrice) {
   return {
     high: round2(Math.max(...prices, currentPrice)),
     low: round2(Math.min(...prices, currentPrice)),
-    performancePct: start === 0 ? 0 : round2(((currentPrice - start) / start) * 100),
+    performancePct: start === 0 ? 0 : round2(((currentPrice - start) / Math.abs(start)) * 100),
     milestoneCount: Math.max(0, points.length - 1),
   };
 }

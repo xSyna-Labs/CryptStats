@@ -16,8 +16,6 @@ const SORT_OPTIONS = [
   ['symbol', 1, 'Kürzel (A–Z)'],
   ['name', 1, 'Name (A–Z)'],
 ];
-const UP = '#16c784';
-const DOWN = '#ea3943';
 const ROLE_LABELS = { root: 'Root', admin: 'Admin', viewer: 'Lesend' };
 
 const state = {
@@ -135,7 +133,7 @@ function renderTicker(stocks) {
   const items = stocks
     .map(
       (s) =>
-        `<a class="tick" href="#/stock/${enc(s.slug)}"><b>${esc(s.symbol)}</b>${fmtPrice(s.price)} <span class="${dirClass(s.changePct24h)}">${fmtPct(s.changePct24h)}</span></a>`,
+        `<a class="tick" href="#/stock/${enc(s.slug)}"><b>${esc(s.symbol)}</b><span class="${s.price < 0 ? 'down' : ''}">${fmtPrice(s.price)}</span> <span class="${dirClass(s.changePct24h)}">${fmtPct(s.changePct24h)}</span></a>`,
     )
     .join('');
   const html = `<div class="ticker-track"><span>${items}</span><span aria-hidden="true">${items}</span></div>`;
@@ -222,6 +220,7 @@ function drawMovers() {
     <a class="mover" href="#/stock/${enc(s.slug)}">
       <div class="muted small">${title}</div>
       <div><span class="sym">${esc(s.symbol)}</span> · ${esc(s.name)}</div>
+      <div class="small ${s.price < 0 ? 'down' : ''}">Kurs: ${fmtPrice(s.price)} ${UNIT}</div>
       <div class="pct ${dirClass(s.changePct24h)}">${arrow(s.changePct24h)} ${fmtPct(s.changePct24h)}</div>
     </a>`;
   el.innerHTML = card('Top-Gewinner (24 h)', best) + card('Top-Verlierer (24 h)', worst);
@@ -278,12 +277,12 @@ function drawMarketTable() {
 }
 
 function marketRow(s, child) {
-  const cls = dirClass(s.changePct24h);
+  const cls = s.price < 0 ? 'down' : dirClass(s.changePct24h);
   const href = `#/stock/${enc(s.slug)}`;
   return `<tr class="${child ? 'child' : ''}" data-href="${href}" tabindex="0">
     <td><span class="symbol">${child ? '↳ ' : ''}${esc(s.symbol)}</span></td>
     <td><a class="name" href="${href}">${esc(s.name)}</a></td>
-    <td class="num">${fmtPrice(s.price)}</td>
+    <td class="num ${s.price < 0 ? 'down' : ''}">${fmtPrice(s.price)}</td>
     <td class="num ${cls}">${fmtPct(s.changePct24h)}</td>
     <td class="spark-cell">${sparkline(s.spark, cls)}</td>
   </tr>`;
@@ -302,6 +301,42 @@ function buildSeries(points, current, from, to) {
     if (p.t > from && p.t <= to) out.push(p);
   }
   out.push({ t: to, price: current, event: null });
+  return out;
+}
+
+/**
+ * Fasst den Kursverlauf in gleich lange Zeitintervalle zusammen (Candlesticks):
+ * Eröffnung, Hoch, Tief und Schluss je Intervall. Der Wert zu Beginn gilt, bis der
+ * nächste Kurspunkt kommt.
+ */
+function buildCandles(pts, from, to, count) {
+  const step = Math.max(to - from, 1) / count;
+  const out = [];
+  let current = pts[0].price;
+  let k = 0;
+  for (let i = 0; i < count; i++) {
+    const t0 = from + i * step;
+    const t1 = i === count - 1 ? to : from + (i + 1) * step;
+    while (k < pts.length && pts[k].t <= t0) {
+      current = pts[k].price;
+      k++;
+    }
+    const open = current;
+    let high = open;
+    let low = open;
+    let close = open;
+    let event = null;
+    while (k < pts.length && pts[k].t <= t1) {
+      const p = pts[k];
+      close = p.price;
+      current = p.price;
+      high = Math.max(high, p.price);
+      low = Math.min(low, p.price);
+      if (p.event) event = p.event;
+      k++;
+    }
+    out.push({ t: (t0 + t1) / 2, o: open, h: high, l: low, c: close, event });
+  }
   return out;
 }
 
@@ -324,23 +359,17 @@ function drawChart() {
   const R = 10;
   const T = 18;
   const B = 26;
-  const values = pts.map((p) => p.price);
-  let lo = Math.min(...values);
-  let hi = Math.max(...values);
-  const pad = (hi - lo) * 0.1 || Math.max(hi, 1) * 0.05;
-  lo = Math.max(0, lo - pad);
-  hi = hi + pad;
+  const count = Math.max(8, Math.min(60, Math.floor((W - L - R) / (compact ? 9 : 12))));
+  const cs = buildCandles(pts, from, now, count);
+  let lo = Math.min(...cs.map((c) => c.l));
+  let hi = Math.max(...cs.map((c) => c.h));
+  const pad = (hi - lo) * 0.1 || Math.max(Math.abs(hi), 1) * 0.05;
+  lo -= pad;
+  hi += pad;
   const x = (t) => L + ((t - from) / Math.max(now - from, 1)) * (W - L - R);
   const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-
-  // Diagonale Verbindungen statt Treppenstufen – so sieht es wie ein echter Kursverlauf aus.
-  let line = `M${x(pts[0].t).toFixed(1)} ${y(pts[0].price).toFixed(1)}`;
-  for (let i = 1; i < pts.length; i++) {
-    line += ` L${x(pts[i].t).toFixed(1)} ${y(pts[i].price).toFixed(1)}`;
-  }
-  const area = `${line} V${H - B} H${x(pts[0].t).toFixed(1)} Z`;
-  const cls = dirClass(stock.price - pts[0].price);
-  const color = cls === 'down' ? DOWN : UP;
+  const bodyW = Math.max(3, Math.min(14, ((W - L - R) / count) * 0.6));
+  const cls = stock.price < 0 ? 'down' : dirClass(stock.price - pts[0].price);
 
   const grid = [0, 1, 2, 3]
     .map((i) => {
@@ -365,9 +394,21 @@ function drawChart() {
     .map(([t, anchor]) => `<text class="axis" x="${x(t)}" y="${H - 8}" text-anchor="${anchor}">${axisLabel(t)}</text>`)
     .join('');
 
-  const dots = pts
-    .filter((p) => p.event)
-    .map((p) => `<circle class="dot ${dirClass(p.event.delta)}" cx="${x(p.t)}" cy="${y(p.price)}" r="4.5"/>`)
+  // Steigt der Schluss gegenüber der Eröffnung, ist die Kerze grün; negative Kurse bleiben rot.
+  const candles = cs
+    .map((c) => {
+      const tone = c.c < 0 || c.c < c.o ? 'candle-down' : 'candle-up';
+      const cx = x(c.t).toFixed(1);
+      const bodyTop = y(Math.max(c.o, c.c)).toFixed(1);
+      const bodyH = Math.max(1.5, Math.abs(y(c.o) - y(c.c))).toFixed(1);
+      const marker = c.event
+        ? `<circle class="dot ${dirClass(c.event.delta)}" cx="${cx}" cy="${y(c.c).toFixed(1)}" r="3.5"/>`
+        : '';
+      return `<g class="${tone}">
+        <line class="wick" x1="${cx}" x2="${cx}" y1="${y(c.h).toFixed(1)}" y2="${y(c.l).toFixed(1)}"/>
+        <rect class="body" x="${(x(c.t) - bodyW / 2).toFixed(1)}" y="${bodyTop}" width="${bodyW.toFixed(1)}" height="${bodyH}" rx="1"/>
+      </g>${marker}`;
+    })
     .join('');
 
   const last = pts[pts.length - 1];
@@ -379,17 +420,9 @@ function drawChart() {
 
   el.innerHTML = `
     <svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kursverlauf von ${esc(stock.name)}">
-      <defs>
-        <linearGradient id="chart-area" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stop-color="${color}" stop-opacity="0.28"/>
-          <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
-        </linearGradient>
-      </defs>
       ${grid}
-      <path d="${area}" fill="url(#chart-area)"/>
-      <path class="line ${cls}" d="${line}" fill="none"/>
+      ${candles}
       ${lastMarker}
-      ${dots}
       <line class="cross" id="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" hidden/>
       <circle class="hover-dot" id="hover" r="5" cx="0" cy="0" hidden/>
       ${xLabels}
@@ -407,26 +440,26 @@ function drawChart() {
     const vx = ((event.clientX - r.left) / r.width) * W;
     let best = 0;
     let bestDistance = Infinity;
-    pts.forEach((p, i) => {
+    cs.forEach((p, i) => {
       const distance = Math.abs(x(p.t) - vx);
       if (distance < bestDistance) {
         bestDistance = distance;
         best = i;
       }
     });
-    const p = pts[best];
+    const p = cs[best];
     const px = x(p.t);
     cross.setAttribute('x1', String(px));
     cross.setAttribute('x2', String(px));
     cross.removeAttribute('hidden');
     hover.setAttribute('cx', String(px));
-    hover.setAttribute('cy', String(y(p.price)));
+    hover.setAttribute('cy', String(y(p.c)));
     hover.removeAttribute('hidden');
     tip.hidden = false;
     const tipWidth = Math.min(220, r.width * 0.8);
     const pointer = (px / W) * r.width;
     tip.style.left = `${Math.max(tipWidth / 2, Math.min(pointer, r.width - tipWidth / 2))}px`;
-    tip.innerHTML = `<strong>${fmtPrice(p.price)} ${UNIT}</strong><br><span class="muted">${fmtDate(new Date(p.t).toISOString())}</span>${
+    tip.innerHTML = `<strong>${fmtPrice(p.c)} ${UNIT}</strong><br><span class="muted">O ${fmtPrice(p.o)} · H ${fmtPrice(p.h)} · T ${fmtPrice(p.l)}</span><br><span class="muted">${fmtDate(new Date(p.t).toISOString())}</span>${
       p.event ? `<br>${esc(p.event.title)} <span class="${dirClass(p.event.delta)}">${fmtSigned(p.event.delta)}</span>` : ''
     }`;
   });
@@ -454,7 +487,7 @@ function statCard(label, value) {
 
 function drawStock() {
   const { stock: s, parent, children, events, scheduled } = state.stock;
-  const cls = dirClass(s.change24h);
+  const cls = s.price < 0 ? 'down' : dirClass(s.change24h);
   const perf = s.stats.performancePct;
   $('#app').innerHTML = `
     <nav class="crumbs">
@@ -468,7 +501,7 @@ function drawStock() {
           ${parent ? `<p class="muted">Unterprojekt von ${esc(parent.name)}</p>` : ''}
         </div>
         <div class="price-block">
-          <div class="price">${fmtPrice(s.price)} <span class="unit">${UNIT}</span></div>
+          <div class="price ${s.price < 0 ? 'down' : ''}">${fmtPrice(s.price)} <span class="unit">${UNIT}</span></div>
           <div class="change ${cls}">${arrow(s.change24h)} ${fmtSigned(s.change24h)} (${fmtPct(s.changePct24h)}) <span class="muted">24 h</span></div>
         </div>
       </div>
@@ -480,9 +513,9 @@ function drawStock() {
 
     <section class="grid-stats">
       ${statCard('Performance seit IPO', `<span class="${dirClass(perf)}">${fmtPct(perf)}</span>`)}
-      ${statCard('Allzeithoch', fmtPrice(s.stats.high))}
-      ${statCard('Allzeittief', fmtPrice(s.stats.low))}
-      ${statCard('Startkurs', fmtPrice(s.startPrice))}
+      ${statCard('Allzeithoch', `<span class="${s.stats.high < 0 ? 'down' : ''}">${fmtPrice(s.stats.high)}</span>`)}
+      ${statCard('Allzeittief', `<span class="${s.stats.low < 0 ? 'down' : ''}">${fmtPrice(s.stats.low)}</span>`)}
+      ${statCard('Startkurs', `<span class="${s.startPrice < 0 ? 'down' : ''}">${fmtPrice(s.startPrice)}</span>`)}
       ${statCard('Meilensteine', String(s.stats.milestoneCount))}
       ${statCard('Notiert seit', fmtDate(s.listedAt))}
     </section>
@@ -511,7 +544,7 @@ function drawStock() {
               (c) => `<a class="child-card" href="#/stock/${enc(c.slug)}">
                 <span class="badge">${esc(c.symbol)}</span>
                 <div>${esc(c.name)}</div>
-                <div class="num">${fmtPrice(c.price)} ${UNIT}</div>
+                <div class="num ${c.price < 0 ? 'down' : ''}">${fmtPrice(c.price)} ${UNIT}</div>
                 <div class="${dirClass(c.changePct24h)}">${fmtPct(c.changePct24h)}</div>
               </a>`,
             )
@@ -614,7 +647,7 @@ function stockFormsHtml() {
             <label>Kürzel<input name="symbol" required maxlength="8" pattern="[A-Za-z0-9]{2,8}" placeholder="z. B. MPJ"></label>
           </div>
           <div class="row">
-            <label>Startkurs<input name="startPrice" type="number" step="0.01" min="0.01" value="100"></label>
+            <label>Startkurs<input name="startPrice" type="number" step="0.01" min="-1000000000" max="1000000000" value="100"></label>
             <label>Notiert seit<input name="listedAt" type="datetime-local" value="${toLocalInput(new Date())}"></label>
           </div>
           <label>Übergeordnetes Projekt<select name="parentId"></select></label>
@@ -785,11 +818,12 @@ function drawAdminStocks(stocks) {
         (s) => `<tr>
           <td><span class="symbol">${esc(s.symbol)}</span></td>
           <td><a href="#/stock/${enc(s.slug)}">${esc(s.name)}</a></td>
-          <td class="num">${fmtPrice(s.price)}</td>
+          <td class="num ${s.price < 0 ? 'down' : ''}">${fmtPrice(s.price)}</td>
           <td>${s.parentId ? esc(byId.get(s.parentId)?.name ?? '') : '–'}</td>
           ${
             write
-              ? `<td><div class="actions">
+              ? `<td>                <div class="actions">
+                  <button type="button" class="primary" data-action="quick-event" data-id="${s.id}">+ Ereignis</button>
                   <button type="button" data-action="edit-stock" data-id="${s.id}">Bearbeiten</button>
                   <button type="button" class="danger" data-action="delete-stock" data-id="${s.id}">Löschen</button>
                 </div></td>`
@@ -1132,6 +1166,17 @@ document.addEventListener('click', async (event) => {
       await api('/api/auth/password', { method: 'POST', body: { currentPassword, newPassword } });
       toast('Passwort geändert. Bitte erneut anmelden.');
       await viewAdmin();
+    } else if (action === 'quick-event') {
+      // Schnellaktion: Ereignisformular und Ereignisliste auf diese Aktie stellen.
+      state.admin.eventStockId = Number(id);
+      const filter = $('#event-stock-filter');
+      if (filter) filter.value = String(id);
+      const formSelect = $('#event-form [name="stockId"]');
+      if (formSelect) formSelect.value = String(id);
+      await refreshAdmin(state.token);
+      const form = $('#event-form');
+      form?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      form?.querySelector('[name="title"]')?.focus({ preventScroll: true });
     } else if (action === 'edit-stock') {
       startEditStock(id);
     } else if (action === 'delete-stock') {
@@ -1167,6 +1212,39 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+/* ---------- RoadMap ---------- */
+
+/** Status: done = erledigt, doing = in Arbeit, planned = geplant. Hier pflegen. */
+const ROADMAP = [
+  { status: 'done', title: 'Projekt-Aktien mit Kursverlauf', text: 'Kurse, Zeiträume und Meilensteine (+/−) als Chart.' },
+  { status: 'done', title: 'Geplante Ereignisse', text: 'Meilensteine mit Zukunftsdatum werden automatisch angewendet.' },
+  { status: 'done', title: 'Benutzerrollen', text: 'Root, Admin und Lesend mit eigener Berechtigung.' },
+  { status: 'done', title: 'Negative Kurse', text: 'Kurse dürfen unter null fallen; sie werden rot dargestellt.' },
+  { status: 'doing', title: 'Mobile Oberfläche & PWA', text: 'Bessere Bedienung auf dem Smartphone, installierbar mit App-Icon.' },
+  { status: 'doing', title: 'Einfachere Admin-Verwaltung', text: 'Schnellaktionen direkt an der Aktie und übersichtlichere Formulare.' },
+  { status: 'planned', title: 'Benachrichtigungen', text: 'Hinweis bei größeren Kursbewegungen.' },
+  { status: 'planned', title: 'Export der Kursdaten', text: 'Kursverläufe als CSV herunterladen.' },
+];
+const ROADMAP_LABELS = { done: 'Erledigt', doing: 'In Arbeit', planned: 'Geplant' };
+
+async function viewRoadmap() {
+  state.token++;
+  state.refresh = null;
+  $('#app').innerHTML = `
+    <section class="card">
+      <h1>RoadMap</h1>
+      <p class="muted">Woran CryptStats gerade arbeitet und was als Nächstes kommt.</p>
+    </section>
+    <section class="card">
+      <ul class="roadmap">${ROADMAP.map(
+        (item) => `<li class="roadmap-item ${item.status}">
+          <span class="tag roadmap-status">${ROADMAP_LABELS[item.status]}</span>
+          <div><strong>${esc(item.title)}</strong><p class="muted">${esc(item.text)}</p></div>
+        </li>`,
+      ).join('')}</ul>
+    </section>`;
+}
+
 /* ---------- Router & Start ---------- */
 
 function route() {
@@ -1176,6 +1254,8 @@ function route() {
     viewStock(decodeURIComponent(parts[1]));
   } else if (parts[0] === 'admin') {
     viewAdmin();
+  } else if (parts[0] === 'roadmap') {
+    viewRoadmap();
   } else {
     viewMarket();
   }
@@ -1201,6 +1281,15 @@ setInterval(async () => {
     // Nächster Durchlauf versucht es erneut.
   }
 }, REFRESH_MS);
+
+// Offline-Start und Installation als App (siehe public/sw.js).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // Ohne Service Worker läuft die App normal weiter.
+    });
+  });
+}
 
 (async () => {
   await Promise.allSettled([loadVersion(), loadAuth()]);

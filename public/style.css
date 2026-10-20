@@ -173,9 +173,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .chart-svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
 .chart-svg .grid { stroke: var(--border); stroke-dasharray: 3 4; }
 .chart-svg .axis { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.chart-svg .line { stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
-.chart-svg .line.up { stroke: var(--up); }
-.chart-svg .line.down { stroke: var(--down); }
+.chart-svg .candle-up { --candle: var(--up); }
+.chart-svg .candle-down { --candle: var(--down); }
+.chart-svg .wick { stroke: var(--candle); stroke-width: 1.4; }
+.chart-svg .body { fill: var(--candle); }
 .chart-svg .dot { stroke: var(--bg); stroke-width: 2; }
 .chart-svg .dot.up { fill: var(--up); }
 .chart-svg .dot.down { fill: var(--down); }
@@ -187,7 +188,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .chart-svg .hover-dot { fill: var(--text); stroke: var(--bg); stroke-width: 2; }
 .tooltip {
   position: absolute; top: 4px; transform: translateX(-50%); pointer-events: none;
-  background: #0b1020; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
   padding: 0.45rem 0.6rem; font-size: 0.82rem; white-space: nowrap; box-shadow: 0 6px 20px rgba(0,0,0,.4);
   max-width: min(260px, 90%);
 }
@@ -215,6 +216,18 @@ form.stack .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
 .hint { font-size: 0.85rem; color: var(--muted); }
 .hint.planned { color: var(--accent); }
 .scroll-hint { display: none; margin: 0 0 0.5rem; }
+
+/* RoadMap */
+.roadmap { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; }
+.roadmap-item {
+  display: grid; grid-template-columns: auto 1fr; gap: 0.7rem; align-items: start;
+  padding: 0.75rem 0.85rem; border: 1px solid var(--border); border-radius: 10px; background: var(--card-2);
+}
+.roadmap-item p { margin: 0.2rem 0 0; }
+.roadmap-status { white-space: nowrap; }
+.roadmap-item.done .roadmap-status { color: var(--up); }
+.roadmap-item.doing .roadmap-status { color: var(--accent); }
+.roadmap-item.planned .roadmap-status { color: var(--muted); }
 .toast {
   position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--card-2); border: 1px solid var(--accent-2);
   border-radius: 10px; padding: 0.7rem 1rem; box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 50;
@@ -307,6 +320,14 @@ form.stack .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
   button { min-height: 38px; }
   .actions button { min-height: 32px; }
   .toast { left: 0.8rem; right: 0.8rem; bottom: 0.8rem; }
+}
+
+/* Mobile: Eingabefelder mit 16 px verhindern das automatische Zoomen in iOS-Safari. */
+@media (max-width: 640px) {
+  input, select, textarea { font-size: 16px; min-height: 42px; }
+  .topbar nav a, .range-bar button, .actions button, .ghost { min-height: 36px; display: inline-flex; align-items: center; }
+  .footer { padding-bottom: calc(0.8rem + env(safe-area-inset-bottom)); }
+  main.container { padding-bottom: calc(1.2rem + env(safe-area-inset-bottom)); }
 }
 
 @media (max-width: 480px) {

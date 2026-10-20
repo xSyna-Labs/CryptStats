@@ -99,7 +99,7 @@ export function validateStockInput(input, now) {
   const startPrice =
     body.startPrice === undefined || body.startPrice === ''
       ? 100
-      : round2(readNumber(body, 'startPrice', { label: 'Startkurs', min: 0.01, max: 1e9 }));
+      : round2(readNumber(body, 'startPrice', { label: 'Startkurs', min: -1e9, max: 1e9 }));
   const listedAt =
     body.listedAt === undefined || body.listedAt === ''
       ? now.toISOString()

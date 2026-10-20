@@ -3,7 +3,7 @@ import { ApiError } from './validate.js';
 import {
   buildSeries,
   changeSince,
-  clampPrice,
+  roundPrice,
   DAY_MS,
   historyStats,
   sampleValues,
@@ -102,7 +102,7 @@ export async function recalculateStock(db, stockId) {
   ];
   let price = stock.start_price;
   for (const event of applied) {
-    price = clampPrice(price + event.delta);
+    price = roundPrice(price + event.delta);
     statements.push(db.prepare('UPDATE events SET price_after = ? WHERE id = ?').bind(price, event.id));
   }
   statements.push(db.prepare('UPDATE stocks SET current_price = ? WHERE id = ?').bind(price, stockId));

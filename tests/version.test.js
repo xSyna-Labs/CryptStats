@@ -67,4 +67,56 @@ describe('versioning', () => {
     assert.match(source, /const UNIT = 'Punkte';/);
     assert.doesNotMatch(source, /\bCoins\b/);
   });
+
+  it('ships a PWA manifest with installable icons and a registered service worker', async () => {
+    const manifest = JSON.parse(await read('../public/manifest.webmanifest'));
+    assert.equal(manifest.display, 'standalone');
+    assert.equal(manifest.start_url, '/');
+    /** @type {{ src: string, sizes: string }[]} */
+    const icons = manifest.icons;
+    const sizes = icons.map((icon) => icon.sizes);
+    assert.ok(sizes.includes('192x192') && sizes.includes('512x512'), 'PNG-Icons 192 und 512 fehlen');
+    for (const icon of icons) {
+      const bytes = await readFile(fileURLToPath(new URL(`../public${icon.src}`, import.meta.url)));
+      assert.ok(bytes.length > 0, `${icon.src} fehlt`);
+    }
+
+    const html = await read('../public/index.html');
+    assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest\?v=/);
+    assert.match(html, /<link rel="apple-touch-icon" sizes="180x180" href="\/logo-180\.png\?v=/);
+
+    const app = await read('../public/app.js');
+    assert.match(app, /navigator\.serviceWorker\.register\('\/sw\.js'\)/);
+    const sw = await read('../public/sw.js');
+    assert.match(sw, /url\.pathname\.startsWith\('\/api\/'\)\) return;/, 'API-Antworten dürfen nie gecacht werden');
+  });
+
+  it('serves the manifest with its MIME type and the RoadMap route is wired up', async () => {
+    const db = openSqliteDatabase(':memory:');
+    const app = createApp({
+      db,
+      config: { cookieSecure: false },
+      assets: createAssetFetcher(PUBLIC_DIR),
+    });
+    try {
+      const res = await app(new Request(`${ORIGIN}/manifest.webmanifest`));
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'application/manifest+json; charset=utf-8');
+    } finally {
+      db.close();
+    }
+
+    const source = await read('../public/app.js');
+    assert.match(source, /parts\[0\] === 'roadmap'/);
+    assert.match(source, /const ROADMAP = \[/);
+  });
+
+  it('supports negative prices and colors negative chart values red', async () => {
+    const source = await read('../public/app.js');
+    assert.match(source, /let lo = Math\.min\(\.\.\.cs\.map\(\(c\) => c\.l\)\);[\s\S]*?lo -= pad;/);
+    assert.match(source, /candle-down/);
+    assert.match(source, /stock\.price < 0 \? 'down' : dirClass\(stock\.price - pts\[0\]\.price\)/);
+    assert.match(source, /s\.price < 0 \? 'down' : dirClass\(s\.changePct24h\)/);
+    assert.match(source, /min="-1000000000"/);
+  });
 });

@@ -12,7 +12,7 @@ import {
   updateStock,
 } from '../src/store.js';
 import { ApiError, validateEventInput, validateStockInput } from '../src/validate.js';
-import { changeSince, clampPrice, sampleValues } from '../src/pricing.js';
+import { changeSince, roundPrice, sampleValues } from '../src/pricing.js';
 
 /** @typedef {ReturnType<typeof openSqliteDatabase>} TestDatabase */
 
@@ -47,9 +47,16 @@ async function detailOf(db, slug, now) {
 }
 
 describe('pricing rules', () => {
-  it('clamps prices to a minimum of 0.01', () => {
-    assert.equal(clampPrice(-50), 0.01);
-    assert.equal(clampPrice(12.345), 12.35);
+  it('rounds prices while preserving negative values', () => {
+    assert.equal(roundPrice(-50.126), -50.13);
+    assert.equal(roundPrice(12.345), 12.35);
+  });
+
+  it('computes percentage changes consistently when prices are negative', () => {
+    const t0 = NOW.getTime();
+    const points = [{ t: t0 - 2 * 24 * 3600_000, price: -100 }];
+    assert.deepEqual(changeSince(points, -50, t0), { reference: -100, change: 50, changePct: 50 });
+    assert.deepEqual(changeSince(points, 50, t0), { reference: -100, change: 150, changePct: 150 });
   });
 
   it('computes the 24h change against the price one day earlier', () => {
@@ -71,6 +78,11 @@ describe('pricing rules', () => {
 });
 
 describe('validation', () => {
+  it('accepts negative and zero start prices', () => {
+    assert.equal(validateStockInput({ name: 'x', symbol: 'XX', startPrice: -12.34 }, NOW).startPrice, -12.34);
+    assert.equal(validateStockInput({ name: 'x', symbol: 'YY', startPrice: 0 }, NOW).startPrice, 0);
+  });
+
   it('rejects a symbol with invalid characters', () => {
     assert.throws(() => validateStockInput({ name: 'x', symbol: 'A-B' }, NOW), ApiError);
   });
@@ -85,6 +97,18 @@ describe('validation', () => {
 });
 
 describe('milestones and prices', () => {
+  it('stores a negative initial price in SQLite', async () => {
+    const { db } = await setup();
+    const stockId = await createStock(
+      db,
+      validateStockInput({ name: 'Negativprojekt', symbol: 'NEG', startPrice: -12.5, listedAt: LISTED.toISOString() }, LISTED),
+      LISTED,
+    );
+    const market = await getMarket(db, NOW);
+    assert.equal(market.stocks.find((stock) => stock.id === stockId)?.price, -12.5);
+    assert.equal((await detailOf(db, 'negativprojekt', NOW)).stock.startPrice, -12.5);
+  });
+
   it('applies a positive and a negative milestone to the price', async () => {
     const { db, stockId } = await setup();
     await createEvent(
@@ -102,14 +126,23 @@ describe('milestones and prices', () => {
     assert.equal(stock.stats.milestoneCount, 2);
   });
 
-  it('never drops the price below the minimum', async () => {
+  it('allows the price to fall below zero and recover again', async () => {
     const { db, stockId } = await setup();
     await createEvent(
       db,
-      validateEventInput({ stockId, title: 'Totalschaden', delta: -500, occursAt: '2026-01-02T00:00:00.000Z' }, NOW),
+      validateEventInput({ stockId, title: 'Totalschaden', delta: -150, occursAt: '2026-01-02T00:00:00.000Z' }, NOW),
       NOW,
     );
-    assert.equal((await detailOf(db, 'cryptstats-core', NOW)).stock.price, 0.01);
+    await createEvent(
+      db,
+      validateEventInput({ stockId, title: 'Erholung', delta: 25, occursAt: '2026-01-03T00:00:00.000Z' }, NOW),
+      NOW,
+    );
+    const detail = await detailOf(db, 'cryptstats-core', NOW);
+    assert.equal(detail.stock.price, -25);
+    assert.equal(detail.stock.stats.low, -50);
+    assert.equal(detail.history[1]?.price, -50);
+    assert.equal(detail.history[2]?.price, -25);
   });
 
   it('keeps scheduled events out of the price until they are due', async () => {
